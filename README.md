@@ -1,0 +1,553 @@
+# FireSpread
+
+Wildfire perimeter-spread prediction for California, 2015-2023. See [CLAUDE.md](CLAUDE.md)
+for the full design; this file covers setup and current status.
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+Already present in this environment: `torch 2.7.0+cu118` (CUDA available, RTX 4070 Laptop),
+`numpy`, `pandas`, `matplotlib`. Installed for Phase 1: `rasterio`, `pyproj`, `shapely`,
+`scipy`, `pyarrow`, `pyyaml`, `requests`, `tqdm`.
+
+Installed for Phase 1.2: `cfgrib 0.9.15.1`, `eccodes 2.47.0` (binary wheel), `xarray`, `zarr`,
+`boto3`. The pip route worked cleanly on Windows + Python 3.13 — no conda needed, and no
+`herbie-data` dependency since `pipeline/hrrr.py` does its own index subsetting.
+
+Not yet installed: `h5py` (if HDF5 is preferred over zarr in Phase 3), `cartopy` (Phase 7 figures).
+
+## FIRMS API key
+
+The downloader needs a NASA FIRMS MAP_KEY:
+
+1. Request one at <https://firms.modaps.eosdis.nasa.gov/api/area/> (email-based, arrives quickly).
+2. Provide it either way:
+
+```bash
+setx FIRMS_MAP_KEY your_key_here
+```
+
+or create a `.env` at the project root containing `FIRMS_MAP_KEY=your_key_here`
+(`.env` is gitignored).
+
+## Phase 1.1 — run it
+
+```bash
+python -m pipeline.download firms --start 2020-08-01 --end 2020-09-30
+```
+
+Downloads in 5-day chunks into `data/raw/firms/`, one CSV per chunk, resumable — rerunning
+skips chunks already on disk and retries only what failed. The full 2015-2023 pull is ~660
+requests, well under the 5000-per-10-minutes quota. Start with a small range to confirm the
+key works.
+
+**The API maximum is 5 days per request, not 10** — above that it returns HTTP 400
+`Invalid day range. Expects [1..5]`. Verified empirically; various docs suggest 10.
+
+Then segment detections into fire events:
+
+```bash
+python -m pipeline.events
+```
+
+Writes `data/processed/fire_events.csv` (one row per fire: id, start/end, centroid, detection
+count, timestep count, patch-fit flag) and `data/processed/detections_labeled.parquet`
+(every kept detection tagged with its `fire_id`).
+
+## Status
+
+- [x] Repo scaffold, config, dependency baseline
+- [x] FIRMS download script (chunked, resumable, retries)
+- [x] Fire event segmentation (spatiotemporal single-link clustering)
+- [x] Full 2015-2023 FIRMS pull — 658 chunks, 67 MB, 741,236 detections after filtering
+- [x] Segmentation over the full archive — **692 usable fire events**
+- [x] Archive gap audit (`download.py audit`)
+- [x] Phase 1.2 — HRRR for the 5 MVP fires (184/185 hours, 1.1 GB)
+- [x] Phase 1.3 — LANDFIRE fuels via LFPS (5 fires, 70 MB)
+- [x] Phase 1.4 — 3DEP elevation via COG windowed reads (5 fires, 1.16 GB)
+- [x] Co-registration verified across all three sources
+- [x] Phase 2 — label rasterisation (`pipeline/labels.py`), 24 h windows, acreage-calibrated
+- [x] Phase 3a — static feature stack (terrain + fuel), co-registration verified
+- [x] Phase 3b — tiled sample index, 661 samples over the MVP fires
+- [ ] Phase 3c — weather channels + Fosberg fuel moisture (**blocked on HRRR re-pull**)
+- [ ] Phase 4 — `WildfireDataset` with on-the-fly tile cropping
+- [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
+
+### Events and split sizes (full archive)
+
+| split | years | fires | detections |
+|---|---|---|---|
+| train | 2015-2019 | 363 | 217,813 |
+| val | 2020-2021 | 187 | 388,108 |
+| test | 2022-2023 | 142 | 31,167 |
+
+Per-year event counts track the real severity record: 2020 (117) and 2017 (111) high, 2019 (44)
+low. **But note the detection totals**: the val years hold 388k detections against 31k in test.
+The CLAUDE.md chronological split puts the two most extreme seasons in California history
+(2020, 2021) in validation and two mild ones (2022, 2023) in test. Model selection will be tuned
+on megafire behaviour and then scored on quiet fires, and headline test CSI will not say much
+about extreme-event performance. Worth revisiting at Phase 7 — the cleanest fix is to keep the
+chronological split but additionally report metrics stratified by fire size.
+
+Ten of eleven spot-checked named fires segment correctly (Camp, Thomas, Tubbs, Carr, Mendocino,
+Rough, Dixie, Caldor, Mosquito, Smith River). The eleventh, McKinney, is missing for the sensor
+reason below.
+
+### Validation — Aug-Sep 2020
+
+The ten largest segmented events are all real, correctly dated, correctly located 2020 fires:
+
+| fire_id | Fire | span (km) | est. acres | official | ratio |
+|---|---|---|---|---|---|
+| 2020_0162 | August Complex | 74 x 116 | 811,879 | 1,032,648 | 0.79 |
+| 2020_0372 | Creek | 43 x 66 | 295,993 | 379,895 | 0.78 |
+| 2020_0184 | North Complex | 68 x 42 | 219,649 | 318,935 | 0.69 |
+| 2020_0229 | SQF Complex | 47 x 35 | 162,765 | 174,178 | 0.93 |
+| 2020_0158 | SCU Lightning | 53 x 60 | 218,364 | 396,624 | 0.55 |
+| 2020_0187 | LNU Lightning | 41 x 77 | 171,209 | 363,220 | 0.47 |
+| 2020_0001 | Red Salmon Complex | 35 x 28 | 120,719 | 144,698 | 0.83 |
+| 2020_0393 | Bobcat | 35 x 35 | 96,325 | 115,997 | 0.83 |
+| 2020_0212 | Dolan | 31 x 32 | 92,745 | 124,924 | 0.74 |
+| 2020_0419 | Slater | 34 x 34 | 92,155 | 157,220 | 0.59 |
+
+Area is estimated from unique 375 m detection cells. Every fire lands **under** its official
+acreage (0.47-0.93x), which is the expected signature: VIIRS sees actively burning fronts, not
+cumulative burn scar, and misses fire under smoke, between overpasses, or below the detection
+threshold. Nothing exceeding 1.0x is the useful signal here — over-merged clusters would
+overshoot. LNU and SCU sit lowest, consistent with the August 2020 smoke inversion and their
+large share of low-intensity grass and oak woodland burning.
+
+## Decisions and deviations from CLAUDE.md
+
+- **`pipeline/events.py` is a new file** not in the CLAUDE.md tree. Event segmentation is MVP
+  checklist item 1 but has no listed home; it is separate from `download.py` because it is
+  a transform, not a fetch.
+- **Source is `VIIRS_SNPP_SP`**, not NRT. NRT only covers roughly the last two months; the
+  standard-processing archive is what covers 2015-2023.
+- **Detections filtered to `type == 0`** (vegetation fires), dropping volcanoes, static land
+  sources such as gas flares, and offshore detections. Without this, industrial hot spots
+  become permanent phantom "fires".
+- **Clustering thresholds** (2 km, 96 h) are validated against the 2020 season (table above)
+  and look correct: no cluster overshoots its official acreage, and the ten largest events map
+  one-to-one onto named fires. Worth re-checking against Camp (2018) and Dixie (2021) once the
+  full archive is down.
+- **S-NPP only, deliberately.** `VIIRS_NOAA20_SP` is also available and returns roughly twice
+  the detections, but only from 2018-04-01. Adding it would make label density jump partway
+  through the training period and be systematically higher in the 2022-2023 test years than in
+  the 2015-2019 training years — a split-dependent bias that would flatter test metrics.
+  If you want the extra density, the clean options are to add NOAA-20 and restrict the whole
+  study to 2019+, or to keep S-NPP as the label source throughout. Confirmed available range:
+  `VIIRS_SNPP_SP` covers 2012-01-20 onward, so it spans 2015-2023 by itself.
+
+## Data gap — 15-day S-NPP outage in peak 2022 season
+
+```bash
+python -m pipeline.download audit
+```
+
+Auditing the full archive turns up exactly one significant hole:
+
+| span | days | note |
+|---|---|---|
+| 2016-01-04 .. 2016-01-06 | 3 | midwinter, plausibly genuine |
+| 2019-02-13 .. 2019-02-15 | 3 | midwinter, plausibly genuine |
+| **2022-07-27 .. 2022-08-10** | **15** | **peak fire season — sensor outage** |
+
+The 2022 window is a real S-NPP VIIRS outage, not a download failure. Re-requesting returns
+HTTP 200 with a header-only CSV every time, while over the identical window and bounding box
+`VIIRS_NOAA20_SP` returns 1,609 detections and `MODIS_SP` returns 216.
+
+It costs the **McKinney Fire** (60,138 acres, ignited 2022-07-29) entirely — it is the one fire
+of eleven spot-checked that has no matching event — plus the run phase of Oak Fire. Both land in
+the **test** split, so this bites evaluation rather than training.
+
+Two guards were added after finding this: `download.py` now flags any header-only chunk inline
+during the run, and `python -m pipeline.download audit` re-runs the whole gap scan on demand.
+A zero-row response is always suspicious here — California has detections on essentially every
+day of the year, so 69 empty days out of 3,287 is the entire base rate.
+
+## Phase 1.2 — HRRR
+
+```bash
+python -m pipeline.hrrr --list-fires
+python -m pipeline.hrrr --all-mvp
+```
+
+`pipeline/hrrr.py` fetches `UGRD`/`VGRD` at 10 m and `TMP`/`RH` at 2 m from
+`s3://noaa-hrrr-bdp-pds/` anonymously. Full surface files are ~109 MB; each one has a `.idx`
+sidecar giving per-message byte offsets, so we merge the wanted messages into contiguous runs and
+pull only those with HTTP Range requests — **4.7 MB per hour instead of 109 MB, a 23x saving**.
+Concatenated GRIB2 messages are a valid GRIB2 file, so the subset opens directly in cfgrib.
+
+The five MVP fires span years, regions, sizes and all three splits:
+
+| fire_id | fire | start | detections | split |
+|---|---|---|---|---|
+| 2017_2405 | (median-size Sierra fire) | 2017-08-05 | 386 | train |
+| 2018_4037 | Camp | 2018-11-08 | 4,451 | train |
+| 2020_3779 | Creek | 2020-09-05 | 37,855 | val |
+| 2021_3526 | Caldor | 2021-08-15 | 19,456 | val |
+| 2022_3298 | Mosquito | 2022-09-07 | 4,207 | test |
+
+Window is T-12h to T+24h per CLAUDE.md Phase 1.2. **Full dataset construction will need the whole
+active period instead** — these fires burn for weeks, and Caldor alone runs 1,224 hours.
+
+### Verified against known meteorology
+
+At the Camp Fire ignition cell (39.774N, -121.500W) on 2018-11-08 20:00 UTC the subset gives
+wind **from 073 degrees at 22 mph** with **RH 10%** and T 18.3 C. That is the Jarbo Gap offshore
+wind event that drove the fire into Paradise, including the warm downslope signature. Nearest
+HRRR cell lands within 30 m of the target coordinate.
+
+### HRRR archive has occasional missing hours
+
+`hrrr.20170806/conus/hrrr.t00z.wrfsfcf00.grib2` is absent from the bucket entirely — both the
+GRIB2 and its `.idx` — while 23z and 01z are present. One hour missing in 185 requested (0.5%).
+
+Phase 3 must handle this, because the feature stack needs wind at T, T-6h and T-12h and any one
+of those can be absent. Suggested rule: **linearly interpolate isolated single-hour gaps** from
+the bracketing hours, which is physically reasonable for 10 m wind and 2 m T/RH, and drop samples
+where two or more consecutive hours are missing. `download_event` already returns the missing
+timestamps so the gap list can be persisted alongside the samples.
+
+## Phase 1.3 — LANDFIRE fuels
+
+```bash
+python -m pipeline.landfire --all-mvp
+```
+
+**The documented endpoint is dead.** `GPServer/LandfireProductService/submitJob` is shadowed by
+the current website and returns HTML for both GET and POST, though the service *metadata* still
+serves JSON, which makes it look alive. The working API is:
+
+| endpoint | purpose |
+|---|---|
+| `GET /api/products` | catalog, 136 CONUS products |
+| `GET /api/job/submit` | `Email`, `Layer_List`, `Area_of_Interest`, `Output_Projection` |
+| `GET /api/job/status?JobId=` | poll to `Succeeded`, then fetch `outputFile` (a zip) |
+
+`Email` is mandatory; it lives in `.env` as `LFPS_EMAIL`. LFPS clips and reprojects server-side,
+so we request per-fire AOIs already in EPSG:5070 instead of the 30 m CONUS mosaic. Output is one
+multi-band GeoTIFF with bands in `Layer_List` order — nothing in the file records which band is
+which, so `landfire.py` writes a `.bands.json` sidecar.
+
+Five MVP fires: 70 MB total, 30 m, EPSG:5070, values in range (FBFM40 91-202, CC 0-95%,
+CH 0-430 dm). Jobs completed in 10-40 s each.
+
+### Fuel version strategy — leakage, not staleness, is the risk
+
+Only **LF2016, LF2022, LF2023** (+2024/25) carry FBFM40/CC/CH. LF2014 ships disturbance only and
+LF2020 topography only, so **there is no pre-2016 fuel map at all**.
+
+CLAUDE.md Phase 1.3 says use the version year *closest* to each fire. That is unsafe: LANDFIRE
+rewrites fuels to reflect burn scars, so a version published after a fire encodes that fire's own
+footprint and the model can read the target off its input. The rule must be *latest version
+strictly before ignition*.
+
+Both strategies are implemented and switchable via `landfire.version_strategy`:
+
+- `fixed` (**current**) — LF2016 for every fire. Homogeneous across train/val/test, no leakage
+  for 2017+. Cost: fuels go stale, up to 7 years by the 2023 test fires.
+- `latest_prior` — newest version predating each fire. Fresher, but the test split would straddle
+  two fuel versions. Before switching, verify LF2022's true disturbance cutoff; if it includes
+  2022, then 2022 fires leak under this strategy too.
+
+Fires before `contaminated_before_year` (2017) are flagged in the manifest either way — LF2016
+includes disturbance through 2016, so 2015-2016 fires (138 of 692) are mildly contaminated with
+no clean alternative available.
+
+## Phase 1.4 — DEM
+
+```bash
+python -m pipeline.dem --all-mvp
+```
+
+USGS 3DEP 1/3 arc-second (~10 m) from AWS Open Data, no credentials. Tiles are COGs, so
+`/vsicurl/` windowed reads pull only each fire's footprint — 56 MB rather than a 468 MB tile.
+Elevation is stored raw in native EPSG:4269; slope, aspect and TPI are derived later per
+CLAUDE.md.
+
+**This does not scale as-is.** 1.16 GB for five fires means roughly 160 GB across all 692. For
+full dataset construction, build one statewide 100 m EPSG:5070 DEM (~0.5 GB) and clip from it;
+the 10 m per-fire clips are worth keeping now only to validate that resampling.
+
+## Co-registration verified
+
+`python -m pipeline.viz layers --fire-id 2018_4037` puts all three sources on one EPSG:5070
+extent. Sampling each source at every detection coordinate:
+
+| fire | detections | on burnable fuel | inside DEM | elevation p5-p95 |
+|---|---|---|---|---|
+| 2017_2405 | 386 | 99.7% | 100% | 2039-2682 m |
+| 2018_4037 Camp | 4,451 | 95.0% | 100% | 246-1277 m |
+| 2020_3779 Creek | 37,855 | 95.0% | 100% | 1074-2582 m |
+| 2021_3526 Caldor | 19,456 | 96.5% | 100% | 1079-2444 m |
+| 2022_3298 Mosquito | 4,207 | 99.0% | 100% | 557-1518 m |
+
+The 1-5% off burnable fuel is expected and informative rather than a defect: fires cross roads and
+developed land, and a 375 m VIIRS pixel does not align to a 30 m fuel cell. Camp sits lowest
+precisely because it burned through Paradise, which LANDFIRE maps as non-burnable developed land.
+
+## Phase 2 — labels
+
+```bash
+python -m pipeline.labels --all-mvp
+python -m pipeline.viz labels --fire-id 2018_4037
+```
+
+Stores **new burn per window**, not cumulative masks: the cumulative label at T is the running OR
+up to T and the target is the OR over the horizon. One representation serves any `t_horizon_h`,
+and burned pixels are not rewritten into every later timestep. Zarr + compression gets 190-470x
+on these sparse binary masks — **0.2 MB for five fires against 93 MB raw**, so all 692 fires will
+be single-digit MB rather than the 3.55 GB budgeted.
+
+### 6 h windows do not work with one polar orbiter
+
+S-NPP is sun-synchronous, so every one of the 741,236 detections lands in two ~4 h bands per day:
+**08-11Z** (night pass, ~02:00 local) and **19-22Z** (day pass, ~13:00 local), about 11 h apart.
+Nothing is ever observed in the other 16 hours.
+
+| window | total | empty | % empty |
+|---|---|---|---|
+| 3 h | 56,769 | 42,929 | 75.6% |
+| 6 h (spec) | 28,678 | 17,097 | **59.6%** |
+| 12 h | 14,685 | 3,104 | 21.1% |
+| **24 h (chosen)** | 7,709 | 684 | **8.9%** |
+
+At 6 h, 60% of targets are empty *because no satellite was overhead* — training on them teaches
+the model that fires stop spreading every other timestep. **Switched to 24 h windows and a 24 h
+horizon**, which also matches Huot et al. 2022 "Next Day Wildfire Spread" (already in the
+references), making CSI directly comparable. Result: 157 of 158 MVP windows usable (99.4%), the
+single exception a genuine multi-day outage during Caldor.
+
+### Dilation is two jobs, not one
+
+CLAUDE.md prescribes a 1-2 px dilation "to account for detection gaps". That conflates restoring
+the VIIRS footprint with bridging gaps between detections, and doing only the first leaves a
+stippled perimeter — at `dil=2` the Camp mask broke into **274 components** with a 0.74 fill
+ratio. Adding morphological **closing** (dilate then erode) joins them without pushing the outer
+boundary out the way more dilation does. Calibrated against official acreage:
+
+| config | Camp | Creek | Caldor | Mosquito | components |
+|---|---|---|---|---|---|
+| dil=2 | 0.57x | 0.96x | 0.97x | 0.85x | 64-274 |
+| dil=4 | 0.87x | 1.13x | 1.13x | 1.15x | 1-5 (over-inflates) |
+| **dil=2 close=4** | **0.77x** | **1.07x** | **1.07x** | **1.04x** | **1-14** |
+
+Three of four fires land within 7% of official acreage. Camp stays low at 0.77x for a real
+reason, not a rasterisation one: it burned most of its area between overpasses and much of it
+through developed land where VIIRS detection is poor.
+
+## Phase 3 — feature stack and sample index
+
+```bash
+python -m pipeline.features static --all-mvp      # terrain + fuel
+python -m pipeline.features index  --all-mvp      # (fire_id, timestep, tile) samples
+python -m pipeline.features hrrr-check --all-mvp  # what weather is still missing
+```
+
+Every layer is warped onto **the grid read back from that fire's label zarr**, not a
+recomputed one, so features and targets cannot drift by a half pixel. LANDFIRE is already
+EPSG:5070 at 30 m so it only downsamples — FBFM40 by **majority** (averaging fuel codes would
+invent classes), CC and CH by area average. The DEM warps from EPSG:4269 by bilinear, and slope,
+aspect (sin/cos) and TPI are derived on the 100 m grid.
+
+Static stack is 7 continuous channels (float16) plus a categorical fuel index: **1.4-9.8 MB per
+fire**.
+
+### Co-registration check
+
+The test that a projection bug would fail:
+
+| fire | burn on non-burnable | slope, burned | unburned | CC, burned | unburned |
+|---|---|---|---|---|---|
+| 2017_2405 | 0.5% | 19.0&deg; | 14.3&deg; | 16.8% | 18.9% |
+| Camp | 6.5% | 13.6&deg; | 9.3&deg; | 42.1% | 32.3% |
+| Creek | 5.1% | 13.6&deg; | 14.1&deg; | 33.0% | 22.1% |
+| Caldor | 3.4% | 12.7&deg; | 11.7&deg; | 45.9% | 30.4% |
+| Mosquito | 1.2% | 19.3&deg; | 12.4&deg; | 54.4% | 42.0% |
+
+Burned cells sit on steeper ground and denser canopy than unburned ones in 4 of 5 fires — fire
+runs upslope and follows fuel. Camp's 6.5% non-burnable is Paradise, which also explains its
+0.77x acreage.
+
+### Sample index
+
+661 samples over the 5 MVP fires. Tiles per timestep scale with fire size, from 1.00 for the
+small 2017 Sierra fire to 8.70 for Creek — which is the option-A argument in one number.
+
+Two bugs worth recording, both mine:
+
+- Tile origins were snapped to a **global lattice** in absolute EPSG:5070 metres so tiles would
+  align across fires. Lattice points do not reliably fall inside a small fire's raster, and
+  `2017_2405` silently produced **zero samples**. Tiles never actually need to align between
+  fires; origins are now perimeter-relative and clamped to the raster.
+- `tile_clipped` compared each tile's target against the **whole fire's** target, which is false
+  by construction whenever a timestep has several tiles — it flagged 85% of samples. It now tests
+  whether target growth touches the tile edge, giving 57.6%.
+
+### Weather is blocked until the HRRR re-pull
+
+24 h windows with `t_steps: 3` need history from **T-48h**, and the MVP pull only covers
+T-12h to T+24h:
+
+| fire | hours needed | present | |
+|---|---|---|---|
+| 2017_2405 | 433 | 36 | 8.3% |
+| Camp | 361 | 37 | 10.2% |
+| Creek | 1,537 | 37 | 2.4% |
+| Caldor | 1,273 | 37 | 2.9% |
+| Mosquito | 313 | 37 | 11.8% |
+
+**3,917 hours needed, 184 present (4.7%).** At 6-hourly sampling that is ~653 files, 3-4.5 GB
+for these five fires. Do this on the target machine rather than re-copying it.
+
+## Storage budget — do NOT materialise samples
+
+Measured on this machine: **83 GB free of 475 GB.** That is the binding constraint on the whole
+project, and CLAUDE.md Phase 3 as written does not fit inside it.
+
+Phase 3 says to save patch samples to zarr/HDF5. With tiling that is 26,876 samples of shape
+`(3, 12, 256, 256)`:
+
+| approach | size | verdict |
+|---|---|---|
+| materialise tiles, float32 | 253.6 GB | 3x over budget |
+| materialise tiles, float16 | 126.8 GB | 1.5x over budget |
+| **per-fire rasters, crop tiles at `__getitem__`** | **~11 GB** | fits |
+
+**Decision: store per-fire rasters and crop tiles on the fly in the Dataset class.** Nothing
+downstream needs materialised patches, and 50%-overlapping tiles duplicate data when written out
+but cost nothing when cropped on demand — so this makes the tiling scheme cheaper, not dearer.
+
+Composition of the ~11 GB:
+
+| component | format | size |
+|---|---|---|
+| static layers (slope, aspect sin/cos, CH, CC, fuel) | float16 | 2.99 GB (1.39 GB if statewide) |
+| burn masks, 11,581 timesteps | uint8 | 3.55 GB |
+| HRRR local windows | float32 | 4.52 GB |
+
+### Two further traps, each fatal on its own
+
+- **Never retain raw HRRR GRIBs.** ~204 GB across all fires. Stream, extract the local window,
+  delete the GRIB — stored footprint becomes 4.52 GB.
+- **Never store per-fire 10 m DEM.** ~160 GB across 692 fires. Use one statewide 100 m
+  EPSG:5070 DEM (~0.5 GB).
+
+Full dataset then lands at roughly **15-20 GB including raw keeps**.
+
+### Bandwidth is a separate budget
+
+Fires overlap heavily, so 176,413 fire-hours dedupe to 43,366 unique calendar hours (4.1x). Still
+~204 GB of transfer at hourly resolution.
+
+- **6-hourly: ~34 GB.** Matches the spec — the feature table only uses wind at T, T-6h, T-12h.
+- **hourly: ~204 GB.** Enables 6 h-aggregated wind stats (mean/max/variability) instead of
+  instantaneous snapshots, which is better physics and speaks to the Phase 8 wind-shift mode.
+
+Starting 6-hourly. HRRR-Zarr (`s3://hrrrzarr/`) would allow spatially chunked reads and cut this
+sharply, but only covers 2016-10 onward — it would mean mixing weather sources mid-study, the same
+homogeneity problem already avoided for sensors and fuels.
+
+## Decided — patch scheme: tile the active perimeter (option A)
+
+Samples are indexed by `(fire_id, timestep, tile_index)`, 256x256 tiles on a 128 px stride
+covering the active perimeter at time T. Configured under `sampling:` in `baseline.yaml`.
+Two consequences to hold onto downstream:
+
+- **Splits must group by `fire_id`.** Tiles of one fire landing in both train and test would
+  leak badly and inflate CSI. This is now `sampling.group_splits_by`.
+- **Adjacent tiles overlap 50%,** so per-sample confidence intervals computed as if samples were
+  independent will be too narrow. Report metrics aggregated per fire, not per tile.
+
+The analysis behind the choice follows.
+
+### Patch scheme comparison
+
+Across the full archive there are **11,581 (fire, 6 h window) pairs over 692 fires**. Measured
+against a 256x256 patch at 100 m (25.6 km across):
+
+| scheme | windows usable | usable for top-5% largest fires | samples | disk (fp32) |
+|---|---|---|---|---|
+| **A** 256 tiled, 128 px stride | 100% | 100% | 26,876 | 0.25 TB |
+| **B** 256 centred (as written) | 90.9% | 64.0% | 10,529 | 0.10 TB |
+| **C** 512 centred | 98.0% | 91.7% | 11,350 | 0.43 TB |
+
+The headline 90.9% for option B hides the actual problem, which is that the loss is not spread
+evenly — it falls almost entirely on the biggest fires:
+
+| fire-size quintile | windows | usable under B |
+|---|---|---|
+| Q1 smallest | 2,317 | 100.0% |
+| Q2 | 2,344 | 100.0% |
+| Q3 | 2,289 | 99.9% |
+| Q4 | 2,361 | 95.5% |
+| **Q5 largest** | 2,270 | **58.5%** |
+
+No fire loses *all* its windows under B — every fire contributes its early growth phase, and
+only the run phase is clipped. So B is not "megafires are excluded" but the subtler and arguably
+worse "megafires are included only while they are small", which biases the model toward
+under-predicting the fast run phase that operationally matters most.
+
+Under A, tiling is cheap for typical fires and only expands where the fire is genuinely big:
+median 1 tile per window, p90 5, max 27. Half of all tile-samples come from the top-5% largest
+fires — that is the 2.6x sample gain, and it lands exactly where B is starved.
+
+### Measured VRAM (this machine, RTX 4070 Laptop, 8.00 GB, ~6.9 GB free)
+
+Peak allocated for a spec-faithful ConvLSTM U-Net (3 layers, hidden [64,128,256]), forward +
+backward + optimizer step, AMP on, T=3, C=12:
+
+| batch | 256x256 | 512x512 |
+|---|---|---|
+| 1 | 0.63 GB | 2.43 GB |
+| 2 | 1.23 GB | 4.82 GB |
+| 4 | 2.43 GB | 9.62 GB (spills) |
+| 8 | 4.82 GB | OOM |
+| 16 | 9.62 GB (spills) | OOM |
+
+"Spills" means it exceeded free VRAM and Windows fell back to system RAM — it completes rather
+than crashing, but it is PCIe-bound and far too slow to train on. Practical maxima here are
+**batch 8 at 256** and **batch 2 at 512**.
+
+This is what makes option C expensive in practice: it needs a 4x smaller batch than A/B, its
+samples are 4x larger on disk, and it still leaves 8.3% of large-fire windows clipped. It buys
+less than tiling and costs more.
+
+### Would more VRAM have changed the answer?
+
+Asked and checked, because it is the obvious objection. On a 16 GB card, 512 px goes from batch 2
+to batch 6, which removes C's practical blocker. Three costs survive that are properties of the
+data rather than the hardware, so the answer stayed A:
+
+- **Coverage.** 512 px still covers only 91.7% of large-fire windows. Closing that needs ~1024 px
+  (99.6%), which is ~9.6 GB/sample — batch 1 even on 16 GB.
+- **Epoch cost.** A pushes 1.76 G px/epoch, C pushes 2.98 G px — C does **1.69x the pixel work**
+  despite 2.4x fewer samples, because tiles materialise only where fire is (median 1 per window)
+  while C pays full 512^2 on every window including the small fires that dominate.
+- **Class imbalance.** Median positive fraction drops from 0.011% (A) to 0.003% (C), pushing
+  implied `pos_weight` from ~9,400 to ~29,100. CLAUDE.md already names imbalance as the loss
+  design driver; C makes the median sample 3.5x emptier.
+
+C's real advantage is context: 51.2 km of upwind terrain and fuel visible to the model versus
+25.6 km. If this ever moves to a 16 GB card, the better use of the headroom is **feeding a 512 px
+input while supervising only the central 256 px** (the U-Net overlap-tile strategy) — C's context
+with A's coverage and positive fraction. Not worth the complexity on 8 GB.
+
+This needs a decision because it changes the sample index scheme that Phases 3, 4, and 7 all
+build on — in particular, splits must then group by `fire_id` so tiles of one fire never straddle
+train/test.
+
+## Known issues to revisit
+
+- `batch_size: 16` in the config comes from CLAUDE.md, but measures at 9.62 GB against 6.9 GB
+  free — it spills to system RAM rather than training at speed. Use **8** at 256x256 (4.82 GB)
+  with gradient accumulation x2 to keep the effective batch at 16, and keep AMP on as the config
+  already specifies. See the measured table above.
+- The August Complex (2020) and similar complexes are genuinely multiple ignitions that merged.
+  CLAUDE.md says to treat merges as a single union geometry, which the clustering does by
+  construction — worth confirming that this is still what you want for the largest events.

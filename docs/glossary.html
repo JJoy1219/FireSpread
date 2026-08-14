@@ -1,0 +1,664 @@
+<title>FireSpread — Working Glossary</title>
+<style>
+  :root{
+    --ground:#EDEFEA; --surface:#F7F8F5; --surface-2:#E3E7DF;
+    --ink:#151C18; --ink-soft:#4C574F; --ink-faint:#77827A;
+    --rule:#C9CFC6; --rule-soft:#DBE0D7;
+    --primary:#24473D; --primary-soft:#3E6B5C;
+    --ember:#A8461A; --ember-soft:#C4652F;
+    --shadow:0 1px 2px rgba(21,28,24,.06), 0 8px 24px -16px rgba(21,28,24,.25);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ground:#0E1311; --surface:#151C19; --surface-2:#1E2723;
+      --ink:#E5E9E3; --ink-soft:#A6B0A8; --ink-faint:#7C867E;
+      --rule:#2B3631; --rule-soft:#222B27;
+      --primary:#84B7A5; --primary-soft:#6C9C8B;
+      --ember:#E28B52; --ember-soft:#C4703A;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#0E1311; --surface:#151C19; --surface-2:#1E2723;
+    --ink:#E5E9E3; --ink-soft:#A6B0A8; --ink-faint:#7C867E;
+    --rule:#2B3631; --rule-soft:#222B27;
+    --primary:#84B7A5; --primary-soft:#6C9C8B;
+    --ember:#E28B52; --ember-soft:#C4703A;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth; scroll-padding-top:1.5rem;}
+  @media (prefers-reduced-motion:reduce){ html{scroll-behavior:auto;} }
+
+  body{
+    background:var(--ground); color:var(--ink);
+    font-family:"Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+    font-size:16px; line-height:1.62; margin:0;
+    -webkit-font-smoothing:antialiased;
+  }
+  .serif{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;}
+  code,.mono{
+    font-family:"Cascadia Code",Consolas,ui-monospace,"SF Mono",Menlo,monospace;
+    font-size:.88em;
+  }
+  code{background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+
+  .wrap{max-width:1180px; margin:0 auto; padding:3rem 1.5rem 6rem;
+        display:grid; grid-template-columns:200px minmax(0,1fr); gap:3.5rem; align-items:start;}
+  @media (max-width:880px){ .wrap{grid-template-columns:1fr; gap:2rem; padding-top:2rem;} }
+
+  /* ---- masthead ---- */
+  header.mast{grid-column:1/-1; border-bottom:2px solid var(--primary); padding-bottom:1.6rem; margin-bottom:.5rem;}
+  .eyebrow{font-family:"Cascadia Code",Consolas,ui-monospace,monospace; font-size:.7rem;
+           letter-spacing:.16em; text-transform:uppercase; color:var(--primary-soft);}
+  h1{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+     font-size:clamp(2rem,4.6vw,3rem); line-height:1.08; margin:.5rem 0 .6rem;
+     font-weight:600; letter-spacing:-.015em; text-wrap:balance;}
+  .standfirst{color:var(--ink-soft); max-width:62ch; font-size:1.05rem; margin:0;}
+
+  /* ---- nav ---- */
+  nav{position:sticky; top:1.5rem; font-size:.83rem;}
+  @media (max-width:880px){
+    nav{position:static; border:1px solid var(--rule); border-radius:6px;
+        padding:1rem 1.1rem; background:var(--surface);}
+  }
+  nav .navlabel{font-family:"Cascadia Code",Consolas,monospace; font-size:.66rem;
+    letter-spacing:.15em; text-transform:uppercase; color:var(--ink-faint);
+    padding-bottom:.6rem; border-bottom:1px solid var(--rule); display:block; margin-bottom:.7rem;}
+  nav ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.42rem;}
+  nav a{color:var(--ink-soft); text-decoration:none; display:block; line-height:1.35;
+        border-left:2px solid transparent; padding-left:.7rem; margin-left:-.7rem;}
+  nav a:hover{color:var(--primary); border-left-color:var(--primary);}
+  nav a:focus-visible{outline:2px solid var(--primary); outline-offset:2px; border-radius:2px;}
+  nav .num{color:var(--ink-faint); font-family:"Cascadia Code",Consolas,monospace; font-size:.72em;}
+
+  main{min-width:0;}
+  section{margin-bottom:3.2rem;}
+  h2{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+     font-size:1.5rem; font-weight:600; margin:0 0 .35rem; letter-spacing:-.01em;
+     color:var(--primary); text-wrap:balance;}
+  .sechint{color:var(--ink-faint); font-size:.9rem; margin:0 0 1.5rem; max-width:64ch;}
+
+  /* ---- entries ---- */
+  dl{margin:0; display:flex; flex-direction:column; gap:1.45rem;}
+  dt{font-weight:650; font-size:1rem; letter-spacing:-.005em;
+     display:flex; flex-wrap:wrap; align-items:baseline; gap:.55rem;}
+  dt .alt{font-weight:400; color:var(--ink-faint); font-size:.85rem;}
+  dd{margin:.3rem 0 0; color:var(--ink-soft); max-width:68ch;}
+  dd p{margin:0 0 .5rem;}
+  dd p:last-child{margin-bottom:0;}
+
+  .here{
+    margin-top:.55rem; padding:.5rem 0 .5rem .9rem;
+    border-left:2px solid var(--primary-soft);
+    color:var(--ink); font-size:.93rem; max-width:66ch;
+  }
+  .here b{font-family:"Cascadia Code",Consolas,monospace; font-size:.72rem;
+    letter-spacing:.13em; text-transform:uppercase; color:var(--primary-soft);
+    display:block; margin-bottom:.16rem; font-weight:600;}
+  .gotcha{border-left-color:var(--ember);}
+  .gotcha b{color:var(--ember);}
+
+  .fig{margin:0 0 2rem; padding:1.4rem 1.2rem 1.1rem; background:var(--surface);
+       border:1px solid var(--rule); border-radius:6px; overflow-x:auto;}
+  .fig figcaption{font-size:.82rem; color:var(--ink-faint); margin-top:.9rem; text-align:center;}
+  svg{display:block; margin:0 auto; max-width:100%; height:auto;}
+
+  table{border-collapse:collapse; width:100%; font-size:.9rem; margin:.6rem 0 0;
+        font-variant-numeric:tabular-nums;}
+  th,td{text-align:left; padding:.4rem .7rem .4rem 0; border-bottom:1px solid var(--rule-soft);}
+  th{font-size:.72rem; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); font-weight:600;}
+  .tw{overflow-x:auto;}
+
+  footer{grid-column:1/-1; border-top:1px solid var(--rule); margin-top:1rem;
+         padding-top:1.2rem; color:var(--ink-faint); font-size:.85rem;}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <span class="eyebrow">FireSpread &middot; reference</span>
+  <h1 class="serif">A working glossary of the wildfire spread problem</h1>
+  <p class="standfirst">Every term this project actually runs on — what it means in general, and
+  what it resolved to here. Entries marked <span style="color:var(--primary-soft);font-weight:600;">in
+  this project</span> carry our measured values; those marked <span style="color:var(--ember);font-weight:600;">the
+  catch</span> are places where the obvious reading is wrong.</p>
+</header>
+
+<nav>
+  <span class="navlabel">Domains</span>
+  <ol>
+    <li><a href="#shape"><span class="num">00</span> The shape of it</a></li>
+    <li><a href="#sensing"><span class="num">01</span> Satellite fire detection</a></li>
+    <li><a href="#weather"><span class="num">02</span> Weather</a></li>
+    <li><a href="#fuels"><span class="num">03</span> Fuels &amp; terrain</a></li>
+    <li><a href="#geo"><span class="num">04</span> Geospatial machinery</a></li>
+    <li><a href="#behaviour"><span class="num">05</span> Fire behaviour</a></li>
+    <li><a href="#learning"><span class="num">06</span> The learning problem</a></li>
+    <li><a href="#model"><span class="num">07</span> Model architecture</a></li>
+    <li><a href="#metrics"><span class="num">08</span> Metrics &amp; baselines</a></li>
+    <li><a href="#training"><span class="num">09</span> Training mechanics</a></li>
+    <li><a href="#ours"><span class="num">10</span> Terms coined here</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="shape">
+  <h2 class="serif">The shape of it</h2>
+  <p class="sechint">Before the vocabulary, the sentence it all serves.</p>
+  <p style="max-width:68ch;color:var(--ink-soft);margin:0 0 1rem;">A satellite passes over California twice a
+  day and reports which 375&nbsp;m cells were on fire. From those reports we reconstruct where each fire's
+  edge was at a sequence of times. Given the edge now, plus the weather, the fuel and the terrain around it,
+  predict where the edge will be 24 hours from now. Everything below is machinery in service of that one
+  sentence.</p>
+
+  <figure class="fig">
+    <svg viewBox="0 0 860 232" role="img" aria-label="Pipeline from four data sources through labels and features into the model and evaluation">
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto">
+          <path d="M0,0 L7,3.2 L0,6.4 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g font-family="Cascadia Code, Consolas, monospace" font-size="11.5" color="currentColor">
+        <g fill="none" stroke="currentColor" stroke-width="1.2" opacity=".45" marker-end="url(#ar)">
+          <path d="M150 36 H236"/><path d="M150 76 H236"/>
+          <path d="M150 116 H236"/><path d="M150 156 H236"/>
+          <path d="M356 36 C400 36 400 96 436 96"/>
+          <path d="M356 116 C400 116 400 96 436 96"/>
+          <path d="M562 96 H612"/><path d="M726 96 H772"/>
+        </g>
+        <g>
+          <rect x="14" y="20" width="136" height="32" rx="4" fill="var(--surface-2)"/>
+          <text x="26" y="40" fill="var(--ember)">FIRMS / VIIRS</text>
+          <rect x="14" y="60" width="136" height="32" rx="4" fill="var(--surface-2)"/>
+          <text x="26" y="80" fill="var(--ink-soft)">HRRR weather</text>
+          <rect x="14" y="100" width="136" height="32" rx="4" fill="var(--surface-2)"/>
+          <text x="26" y="120" fill="var(--ink-soft)">LANDFIRE fuels</text>
+          <rect x="14" y="140" width="136" height="32" rx="4" fill="var(--surface-2)"/>
+          <text x="26" y="160" fill="var(--ink-soft)">3DEP terrain</text>
+
+          <rect x="238" y="20" width="118" height="32" rx="4" fill="none" stroke="var(--primary)" stroke-width="1.3"/>
+          <text x="250" y="40" fill="var(--primary)">burn masks</text>
+          <rect x="238" y="100" width="118" height="32" rx="4" fill="none" stroke="var(--primary)" stroke-width="1.3"/>
+          <text x="250" y="120" fill="var(--primary)">feature stack</text>
+
+          <rect x="438" y="80" width="124" height="32" rx="4" fill="none" stroke="var(--primary)" stroke-width="1.3"/>
+          <text x="450" y="100" fill="var(--primary)">256px tiles</text>
+
+          <rect x="614" y="80" width="112" height="32" rx="4" fill="var(--surface-2)"/>
+          <text x="626" y="100" fill="var(--ink)">ConvLSTM</text>
+
+          <rect x="774" y="80" width="72" height="32" rx="4" fill="var(--surface-2)"/>
+          <text x="786" y="100" fill="var(--ink)">CSI</text>
+        </g>
+        <g fill="var(--ink-faint)" font-size="10">
+          <text x="238" y="66">Phase 2</text>
+          <text x="238" y="146">Phase 3</text>
+          <text x="438" y="126">Phase 4</text>
+          <text x="614" y="126">Phase 5-6</text>
+          <text x="774" y="126">Phase 7</text>
+        </g>
+      </g>
+    </svg>
+    <figcaption>Four sources in, one probability map out. The awkward joins are all on the left.</figcaption>
+  </figure>
+</section>
+
+<section id="sensing">
+  <h2 class="serif">Satellite fire detection</h2>
+  <p class="sechint">Where the labels come from — and the source of most of this project's hard constraints.</p>
+  <dl>
+    <dt>Active fire detection</dt>
+    <dd>A satellite observation that a given ground cell was <em>emitting fire-like heat at the moment of
+    overpass</em>. Critically it is not a burned-area product: it says "burning now", not "burned at some
+    point". A fire that flares and dies between two overpasses is never recorded.</dd>
+
+    <dt>FIRMS <span class="alt">Fire Information for Resource Management System</span></dt>
+    <dd>NASA's distribution service for active fire detections. Serves CSV over a REST API keyed by a
+    <code>MAP_KEY</code>. Each row is one detection: latitude, longitude, acquisition time, confidence, FRP.
+    <div class="here"><b>in this project</b>741,236 detections across 2015–2023 for the California bounding box,
+    67&nbsp;MB, the complete label source.</div></dd>
+
+    <dt>VIIRS <span class="alt">Visible Infrared Imaging Radiometer Suite</span></dt>
+    <dd>The instrument. Its fire product resolves to 375&nbsp;m cells — considerably finer than the 1&nbsp;km
+    MODIS heritage product, which is why it is the right choice for perimeter work.</dd>
+
+    <dt>S-NPP and NOAA-20 <span class="alt">the spacecraft</span></dt>
+    <dd>Two satellites carrying VIIRS. S-NPP has flown since 2011; NOAA-20 joined in 2018.
+    <div class="here gotcha"><b>the catch</b>Adding NOAA-20 would double the observations, but only from 2018 —
+    so early training years would be observed half as often as late ones, and the model would learn the
+    sensor's history rather than the fire's. We use S-NPP alone for homogeneity.</div></dd>
+
+    <dt>Sun-synchronous orbit</dt>
+    <dd>An orbit that crosses every latitude at the same local solar time each day. It gives consistent
+    illumination, and it is the reason coverage is not continuous but arrives in fixed daily slots.
+    <div class="here gotcha"><b>the catch</b>This single fact reshaped the project. All 741,236 detections fall in
+    two ~4-hour bands — 08–11Z and 19–22Z, about 11 hours apart. Nothing is ever seen in the other 16 hours,
+    so CLAUDE.md's 6-hour windows were 59.6% empty and we moved to 24.</div></dd>
+
+    <dt>Overpass &middot; revisit</dt>
+    <dd>An <em>overpass</em> is one transit of the satellite over a location; the <em>revisit interval</em> is
+    the time until the next. For one polar orbiter at these latitudes: roughly twice daily.</dd>
+
+    <dt>Swath &middot; scan and track</dt>
+    <dd>The <em>swath</em> is the ground strip the sensor images in one pass. Cells near the swath edge are
+    viewed obliquely and cover more ground than those at nadir — FIRMS reports each detection's actual
+    footprint as <code>scan</code> and <code>track</code> in km.
+    <div class="here"><b>in this project</b>Not yet used. We approximate the footprint with a fixed dilation
+    instead, which is why perimeters needed calibrating against known acreage.</div></dd>
+
+    <dt>FRP <span class="alt">Fire Radiative Power</span></dt>
+    <dd>Radiative energy release rate in megawatts — a proxy for how intensely a cell is burning, not merely
+    whether it is. Available as a feature; not yet used.</dd>
+
+    <dt>Confidence <span class="alt">low / nominal / high</span></dt>
+    <dd>VIIRS's own categorical quality flag. Low-confidence detections include sun glint, hot bare soil and
+    industrial heat.
+    <div class="here"><b>in this project</b>Filtered to nominal and above, per CLAUDE.md.</div></dd>
+
+    <dt>Detection type</dt>
+    <dd>A classification field: 0 vegetation fire, 1 volcano, 2 other static land source, 3 offshore.
+    <div class="here"><b>in this project</b>Filtered to type 0. Without it, gas flares and industrial hot spots
+    persist across years and register as permanent phantom fires.</div></dd>
+
+    <dt>NRT vs SP <span class="alt">near-real-time vs standard processing</span></dt>
+    <dd>NRT is published within hours using predicted orbit data and covers only the recent past. SP is the
+    reprocessed archive with final geolocation.
+    <div class="here"><b>in this project</b><code>VIIRS_SNPP_SP</code> — NRT reaches back roughly two months and
+    cannot serve a 2015–2023 study.</div></dd>
+  </dl>
+</section>
+
+<section id="weather">
+  <h2 class="serif">Weather</h2>
+  <p class="sechint">Wind is the dominant driver of short-term spread; humidity and temperature govern how readily fuel ignites.</p>
+  <dl>
+    <dt>HRRR <span class="alt">High-Resolution Rapid Refresh</span></dt>
+    <dd>NOAA's 3&nbsp;km hourly weather model for the continental US, updated every hour. Our source for wind,
+    temperature and humidity. Archived publicly on S3 back to mid-2014.</dd>
+
+    <dt>Analysis vs forecast hour</dt>
+    <dd>The <em>analysis</em> (<code>f00</code>, marked <code>anl</code>) is the model's best estimate of
+    conditions <em>now</em>, having assimilated observations. <code>f01</code>, <code>f02</code>… are
+    projections forward. For reconstructing past weather you want analysis at every hour, not a single run's
+    forecast chain.</dd>
+
+    <dt>GRIB2</dt>
+    <dd>The binary format meteorological data ships in. A file is a concatenation of independent
+    <em>messages</em>, each one variable at one level at one time — which is what makes partial retrieval
+    possible at all.</dd>
+
+    <dt><code>.idx</code> sidecar</dt>
+    <dd>A plain-text index published beside each GRIB2 file giving the byte offset of every message. Read the
+    index, compute the byte ranges you need, request only those.
+    <div class="here"><b>in this project</b>Each HRRR surface file is ~109&nbsp;MB; the four fields we need are
+    4.7&nbsp;MB. Byte-range subsetting is a <strong>23x</strong> saving, and merging adjacent messages into
+    contiguous runs cuts the request count further.</div></dd>
+
+    <dt>UGRD &middot; VGRD</dt>
+    <dd>Wind decomposed into components: <code>UGRD</code> eastward, <code>VGRD</code> northward, both at
+    10&nbsp;m above ground. Components rather than speed-and-bearing because direction is circular — 359° and
+    1° are adjacent in reality but maximally distant numerically, which wrecks both interpolation and
+    gradients.</dd>
+
+    <dt>RH &middot; TMP</dt>
+    <dd>Relative humidity and temperature at 2&nbsp;m. Together they set how dry the fine fuels are.
+    <div class="here"><b>in this project</b>At the Camp Fire ignition cell we measured wind from 073° at 22&nbsp;mph
+    with RH 10% — the Jarbo Gap offshore event, recovered correctly from the subset.</div></dd>
+
+    <dt>Reanalysis <span class="alt">and ERA5</span></dt>
+    <dd>A retrospective, physically consistent reconstruction of past weather. ERA5 is the global one at
+    ~31&nbsp;km — far coarser than HRRR but reaching back to 1940, the fallback for pre-2014 fires.</dd>
+  </dl>
+</section>
+
+<section id="fuels">
+  <h2 class="serif">Fuels &amp; terrain</h2>
+  <p class="sechint">What is available to burn, and the shape of the ground it sits on. Both change slowly, so both are treated as static per fire.</p>
+  <dl>
+    <dt>LANDFIRE</dt>
+    <dd>A US interagency programme mapping vegetation, fuel and disturbance at 30&nbsp;m, republished
+    periodically as versioned snapshots (LF2016, LF2022, LF2023…).</dd>
+
+    <dt>Fuel model &middot; FBFM40 <span class="alt">Scott &amp; Burgan 40</span></dt>
+    <dd>A categorical scheme assigning each cell one of 40 standard fuel types — grass, shrub, timber litter,
+    slash — each with laboratory-characterised burning behaviour. Categorical, so it resamples by nearest
+    neighbour or majority, never by averaging: the mean of "grass" and "timber" is meaningless.</dd>
+
+    <dt>CC &middot; CH <span class="alt">canopy cover, canopy height</span></dt>
+    <dd>Fraction of ground shaded by tree crowns, and their height. Together they govern whether fire stays on
+    the surface or climbs into the crowns, and how much the canopy shelters surface wind.</dd>
+
+    <dt>LFPS <span class="alt">LANDFIRE Product Service</span></dt>
+    <dd>The REST API that clips and reprojects LANDFIRE layers on demand: submit a job with a layer list and
+    an area, poll, download a GeoTIFF.
+    <div class="here gotcha"><b>the catch</b>Only LF2016, LF2022 and LF2023 carry fuels — LF2014 and LF2020 ship
+    disturbance and topography only. And since LANDFIRE encodes burn scars, using a version published
+    <em>after</em> a fire leaks that fire's own footprint into its input.</div></dd>
+
+    <dt>DEM <span class="alt">digital elevation model</span></dt>
+    <dd>A raster of ground elevation. Slope and aspect are derived from it rather than stored.</dd>
+
+    <dt>SRTM &middot; 3DEP</dt>
+    <dd>Two elevation sources: SRTM is the 30&nbsp;m near-global shuttle radar product; 3DEP is the USGS
+    programme, 10&nbsp;m over the US and largely lidar-derived.</dd>
+
+    <dt>COG <span class="alt">cloud-optimised GeoTIFF</span></dt>
+    <dd>A GeoTIFF internally tiled and indexed so a reader can fetch just the region it needs over HTTP
+    without downloading the file.
+    <div class="here"><b>in this project</b>3DEP tiles are 468&nbsp;MB each; a windowed read of the Camp Fire
+    footprint pulls 56&nbsp;MB. The same idea as the HRRR <code>.idx</code> trick, in a different format.</div></dd>
+
+    <dt>Slope &middot; aspect</dt>
+    <dd>Steepness, and the compass direction a hillside faces. Fire runs uphill far faster than down —
+    flames preheat the fuel above them. Aspect governs sun exposure and therefore how dry that fuel is.
+    <div class="here"><b>in this project</b>Aspect is stored as <code>sin</code> and <code>cos</code> rather than
+    degrees, for the same circular-discontinuity reason as wind.</div></dd>
+
+    <dt>TPI <span class="alt">topographic position index</span></dt>
+    <dd>A cell's elevation minus the mean of its neighbourhood. Positive on ridges, negative in valleys, near
+    zero on uniform slopes — a compact encoding of landform that raw elevation does not provide.</dd>
+
+    <dt>Dead fuel moisture &middot; the Fosberg equations</dt>
+    <dd>Water content of dead fuel as a percentage of dry weight — the single strongest control on whether
+    fire spreads at all. <em>10-hour</em> fuel refers to sticks roughly 6–25&nbsp;mm thick, which equilibrate
+    with the air over about ten hours. Fosberg's equations estimate it from temperature and humidity.</dd>
+  </dl>
+</section>
+
+<section id="geo">
+  <h2 class="serif">Geospatial machinery</h2>
+  <p class="sechint">Four sources on four different grids. Most pipeline bugs in this domain are quiet misalignments, not crashes.</p>
+  <dl>
+    <dt>CRS <span class="alt">coordinate reference system</span></dt>
+    <dd>The rule mapping numbers to places on Earth. Two layers can only be combined once they are in the
+    same CRS.</dd>
+
+    <dt>EPSG:4326 <span class="alt">WGS84 lat/lon</span></dt>
+    <dd>Degrees of latitude and longitude — the GPS standard, and how FIRMS reports. Unsuitable for
+    modelling: a degree of longitude is ~111&nbsp;km at the equator and ~82&nbsp;km in northern California, so
+    square pixels are not square ground.</dd>
+
+    <dt>EPSG:5070 <span class="alt">Albers Equal Area CONUS</span></dt>
+    <dd>A projection in metres, tuned for the continental US, that preserves area. Equal-area matters here
+    because burned area is the quantity being predicted and scored.
+    <div class="here"><b>in this project</b>The modelling CRS. Everything is resampled to a 100&nbsp;m EPSG:5070
+    grid — clustering, rasterisation and tiling all agree because they share it.</div></dd>
+
+    <dt>Lambert Conformal Conic</dt>
+    <dd>HRRR's native projection. Conformal preserves angles rather than areas — sensible for wind, wrong for
+    burned area, hence reprojection into 5070.</dd>
+
+    <dt>Raster &middot; vector</dt>
+    <dd>A <em>raster</em> is a grid of cells; a <em>vector</em> is points, lines and polygons. FIRMS arrives
+    as vector points; the model consumes raster.</dd>
+
+    <dt>Rasterisation</dt>
+    <dd>Converting vector geometry into a grid, deciding which cells a shape occupies.</dd>
+
+    <dt>Affine transform</dt>
+    <dd>Six numbers mapping a raster's row and column indices to real-world coordinates: pixel size, rotation,
+    and the origin corner. Storing it alongside an array is what makes the array geographic rather than
+    merely rectangular.</dd>
+
+    <dt>Resampling <span class="alt">nearest / bilinear / majority</span></dt>
+    <dd>Moving values onto a new grid. <em>Nearest</em> copies the closest cell, correct for categories.
+    <em>Bilinear</em> interpolates, correct for continuous fields like elevation. <em>Majority</em> takes the
+    commonest value in the source footprint, correct for downsampling categories.
+    <div class="here gotcha"><b>the catch</b>Bilinear on FBFM40 would average fuel-model <em>codes</em> and invent
+    classes that do not exist.</div></dd>
+
+    <dt>Windowed read &middot; byte-range request</dt>
+    <dd>Fetching only the needed bytes of a remote file instead of the whole thing. The single most valuable
+    technique in this pipeline — it is what keeps 204&nbsp;GB of HRRR and 25&nbsp;GB of elevation off the disk.</dd>
+  </dl>
+</section>
+
+<section id="behaviour">
+  <h2 class="serif">Fire behaviour</h2>
+  <p class="sechint">The physical vocabulary the model is implicitly learning, and which the failure modes are described in.</p>
+  <dl>
+    <dt>Perimeter &middot; burn scar</dt>
+    <dd>The <em>perimeter</em> is the boundary of the burned region at a moment; the <em>burn scar</em> is the
+    lasting footprint left behind, visible in imagery and encoded into later fuel maps.</dd>
+
+    <dt>Head &middot; flank &middot; backing</dt>
+    <dd>The <em>head</em> runs with the wind and moves fastest; the <em>flanks</em> spread sideways; the
+    <em>backing</em> edge creeps against the wind, sometimes orders of magnitude slower. One fire therefore
+    has several very different spread rates at once, which is exactly why a purely radial model is a weak
+    baseline.
+    <div class="here"><b>in this project</b>Visible in the Camp Fire figure: the westward run in the first day,
+    then slow eastward backing over the following week.</div></dd>
+
+    <dt>Run</dt>
+    <dd>A period of rapid wind- or slope-driven advance. Most of a large fire's total area is typically
+    accumulated in a handful of runs lasting hours.</dd>
+
+    <dt>Spotting <span class="alt">ember transport</span></dt>
+    <dd>Embers lofted ahead of the front igniting new fire beyond it — sometimes kilometres out. Appears in
+    the data as burning that is disconnected from the perimeter, and will read as a false negative even when
+    the model is behaving sensibly.</dd>
+
+    <dt>Offshore &middot; downslope wind</dt>
+    <dd>Wind reversing the usual onshore pattern, descending terrain and compressing as it falls, which warms
+    and dries it. California's are named — Diablo in the north, Santa Ana in the south. They drive the most
+    destructive fires.
+    <div class="here"><b>in this project</b>The Camp Fire's 073°/22&nbsp;mph/10% RH is a textbook instance, and it
+    validated the HRRR pipeline end to end.</div></dd>
+
+    <dt>Suppression</dt>
+    <dd>Firefighting. It bends spread in ways no public dataset records, so a suppressed fire and a
+    free-burning fire look identical in the inputs while behaving differently — an irreducible noise floor.</dd>
+
+    <dt>FARSITE &middot; Rothermel</dt>
+    <dd>Rothermel's 1972 equations are the physics of surface fire spread; FARSITE is the operational
+    simulator built on them. FARSITE is the benchmark to beat — and it needs hand-specified conditions per
+    run, which is where a learned model can win on speed.</dd>
+  </dl>
+</section>
+
+<section id="learning">
+  <h2 class="serif">The learning problem</h2>
+  <p class="sechint">How a continuous physical process becomes a finite set of supervised examples.</p>
+  <dl>
+    <dt>Timestep &middot; window</dt>
+    <dd>The discretisation of time. A <em>window</em> is the interval whose detections form one snapshot; a
+    <em>timestep</em> is one such snapshot in a fire's sequence.
+    <div class="here"><b>in this project</b>24 hours, forced by the twice-daily revisit. 7,709 windows across
+    692 fires, 8.9% of them empty.</div></dd>
+
+    <dt>Label vs target</dt>
+    <dd>The <em>label</em> is what is known at prediction time — cumulative burned area up to T, an input.
+    The <em>target</em> is what must be predicted — newly burned area from T to T+24h. Confusing the two is
+    the classic way to build a model that scores brilliantly and knows nothing.</dd>
+
+    <dt>Horizon</dt>
+    <dd>How far ahead the prediction reaches. Must match the window here, since a target cannot be finer than
+    the observations composing it.</dd>
+
+    <dt>Patch &middot; tile &middot; stride</dt>
+    <dd>A <em>patch</em> is the fixed-size crop the network consumes (256&times;256 at 100&nbsp;m = 25.6&nbsp;km
+    square). <em>Tiling</em> covers a large fire with several patches; the <em>stride</em> is the step between
+    their origins, so a 128&nbsp;px stride on a 256&nbsp;px tile means 50% overlap.
+    <div class="here"><b>in this project</b>Tiling was chosen because a single centred patch retained only 58.5%
+    of windows for the largest fires — megafires would have been represented only while small.</div></dd>
+
+    <dt>Class imbalance &middot; <code>pos_weight</code></dt>
+    <dd>Burning cells are vastly outnumbered by unburned ones, so a model predicting "nothing burns" scores
+    99.99% accuracy. <code>pos_weight</code> scales the loss on positive pixels to compensate.
+    <div class="here"><b>in this project</b>Median positive fraction 0.011%, implying <code>pos_weight</code>
+    around 9,400 — and one of the arguments against a larger patch, which would have made it 3.5x worse.</div></dd>
+
+    <dt>Leakage</dt>
+    <dd>Information reaching the model that would not exist at genuine prediction time. It inflates scores and
+    is often invisible until deployment.
+    <div class="here gotcha"><b>the catch</b>Three distinct routes here: tiles of one fire split across train and
+    test; LANDFIRE versions postdating a fire and encoding its own scar; and any future weather leaking into
+    the input window.</div></dd>
+
+    <dt>Fire-level split</dt>
+    <dd>Partitioning train/validation/test by whole fire, never by sample. Every timestep and tile of a fire
+    stays on one side of the line.</dd>
+
+    <dt>Augmentation</dt>
+    <dd>Synthetic training variety through transformation. Constrained here: flips must also negate the
+    corresponding wind component, arbitrary rotation is invalid because terrain and prevailing wind are not
+    rotationally symmetric, and intensity jitter is meaningless on a binary mask.</dd>
+
+    <dt>Normalisation</dt>
+    <dd>Rescaling each channel to comparable range so no input dominates by unit alone. Statistics must be
+    computed on the training split only — deriving them from all data leaks test information.</dd>
+  </dl>
+</section>
+
+<section id="model">
+  <h2 class="serif">Model architecture</h2>
+  <p class="sechint">Two ideas combined: something that reasons over space, and something that reasons over time.</p>
+  <dl>
+    <dt>U-Net</dt>
+    <dd>An encoder–decoder network for dense prediction. The encoder downsamples to capture context, the
+    decoder upsamples back to full resolution, and the output is one value per input pixel.</dd>
+
+    <dt>Skip connection</dt>
+    <dd>A direct link from an encoder layer to the matching decoder layer, restoring the fine spatial detail
+    that downsampling discards. Without them a U-Net produces blurred, spatially imprecise boundaries.</dd>
+
+    <dt>ConvLSTM</dt>
+    <dd>An LSTM whose internal operations are convolutions rather than matrix multiplications, so its memory
+    is a spatial map rather than a vector. It can carry "the front has been advancing north-east for two days"
+    as a structured, located memory.</dd>
+
+    <dt>Probability map</dt>
+    <dd>The output: a per-pixel burn probability in [0,1] via sigmoid, thresholded to a binary mask for
+    scoring. Keeping probabilities allows calibration assessment and a tunable operational threshold.</dd>
+
+    <dt>Weighted BCE &middot; focal loss &middot; Dice</dt>
+    <dd>Three responses to imbalance. <em>Weighted BCE</em> multiplies the positive class's loss.
+    <em>Focal loss</em> down-weights already-easy examples so training concentrates on hard ones.
+    <em>Dice</em> optimises overlap directly but is insensitive to small fires — which are the hard and
+    operationally important cases — so CLAUDE.md rules it out as a sole objective.</dd>
+  </dl>
+</section>
+
+<section id="metrics">
+  <h2 class="serif">Metrics &amp; baselines</h2>
+  <p class="sechint">Accuracy is useless at this imbalance. These are the measures that mean something.</p>
+  <dl>
+    <dt>TP &middot; FP &middot; FN</dt>
+    <dd>Per pixel: predicted burn that did burn; predicted burn that did not; actual burn that was missed.
+    True negatives are deliberately excluded from every metric below — there are millions of them and they
+    are trivially correct.</dd>
+
+    <dt>CSI &middot; IoU <span class="alt">critical success index / intersection over union</span></dt>
+    <dd><code>TP / (TP + FP + FN)</code>. The same quantity under two names — CSI in meteorology, IoU in
+    computer vision. The headline score, and the checkpoint selection criterion.</dd>
+
+    <dt>POD &middot; FAR</dt>
+    <dd><em>Probability of detection</em>, <code>TP/(TP+FN)</code>, is the fraction of real spread caught.
+    <em>False alarm ratio</em>, <code>FP/(TP+FP)</code>, is the fraction of predicted spread that was wrong.
+    They trade off against each other, which is why CSI is reported alongside both.</dd>
+
+    <dt>Brier score</dt>
+    <dd>Mean squared error of the probabilities themselves. Measures calibration — whether "70% likely" is
+    right about 70% of the time — which threshold-based metrics cannot see.</dd>
+
+    <dt>Persistence baseline</dt>
+    <dd>Predict that nothing changes: tomorrow's burned area equals today's. Deceptively strong, because most
+    of a fire's area on any given day was already burning. Any model that cannot beat it has learned nothing.</dd>
+
+    <dt>Circular spread baseline</dt>
+    <dd>Expand the perimeter uniformly outward at the training-set median rate. Tests whether the model has
+    learned anything <em>directional</em> — wind, slope, fuel — beyond mere growth.</dd>
+  </dl>
+</section>
+
+<section id="training">
+  <h2 class="serif">Training mechanics</h2>
+  <p class="sechint">Mostly hardware-shaped. This runs on an 8 GB laptop GPU, which is a real constraint rather than a footnote.</p>
+  <dl>
+    <dt>VRAM &middot; batch size &middot; gradient accumulation</dt>
+    <dd>GPU memory holds the model, the activations and the gradients; <em>batch size</em> is how many samples
+    are processed together. <em>Gradient accumulation</em> sums gradients over several small batches before
+    stepping, giving a large batch's statistics at a small batch's memory cost.
+    <div class="here"><b>in this project</b>Measured 0.602&nbsp;GB per sample at 256&nbsp;px: batch 11 fits in
+    8&nbsp;GB, not the 16 CLAUDE.md specifies.</div></dd>
+
+    <dt>AMP <span class="alt">automatic mixed precision</span></dt>
+    <dd>Running most operations in 16-bit while keeping a 32-bit master copy of the weights. Roughly halves
+    activation memory and speeds up matrix work at negligible accuracy cost.</dd>
+
+    <dt>Gradient clipping</dt>
+    <dd>Capping gradient magnitude before the optimiser step. Recurrent networks are prone to exploding
+    gradients as updates compound through time; clipping at 1.0 is the standard guard.</dd>
+
+    <dt>Cosine annealing with warm restarts</dt>
+    <dd>A learning-rate schedule that decays along a cosine curve then jumps back up. The restarts help escape
+    sharp minima and often improve generalisation over monotonic decay.</dd>
+
+    <dt>Overfit test</dt>
+    <dd>Deliberately training on a single fire until the model memorises it. Not a result — a wiring check. If
+    a network cannot overfit one example, something upstream is broken, and this is the cheapest place to
+    discover that.</dd>
+
+    <dt>Early stopping</dt>
+    <dd>Halting when validation stops improving for a set number of epochs, and keeping the best checkpoint —
+    selected here on validation CSI rather than loss, since loss is dominated by the easy negatives.</dd>
+  </dl>
+</section>
+
+<section id="ours">
+  <h2 class="serif">Terms coined here</h2>
+  <p class="sechint">Not standard vocabulary — names given to decisions made in this codebase, recorded so the code reads consistently.</p>
+  <dl>
+    <dt>Fire event segmentation</dt>
+    <dd>FIRMS supplies unlabelled points, not fires. Segmentation groups them into discrete events so the data
+    can be split and reasoned about per fire.
+    <div class="here"><b>in this project</b>741,236 detections resolved into 692 usable fires.</div></dd>
+
+    <dt>Single-link clustering &middot; union-find</dt>
+    <dd>Two detections join the same fire if within 2&nbsp;km and 96 hours of each other, and the relation is
+    then made transitive. <em>Union-find</em> is the data structure computing that closure efficiently. Single-link
+    is the right choice because a fire creeps: its ends may be far apart while every step between them is close.</dd>
+
+    <dt>Link distance &middot; link time</dt>
+    <dd>The two clustering thresholds. Too loose and separate fires merge into a blob; too tight and one fire
+    shatters into fragments across overpass gaps.</dd>
+
+    <dt><code>burn_new</code> vs cumulative</dt>
+    <dd>Storing each window's <em>newly</em> detected burn rather than the running total. The cumulative label
+    is then an OR up to T and the target an OR over the horizon — one representation serving any horizon,
+    without rewriting the same pixels into every later timestep.</dd>
+
+    <dt><code>usable</code> &middot; <code>gap_flag</code></dt>
+    <dd>Per-window flags marking whether it may serve as a prediction target. An unobserved window is not
+    evidence a fire stopped, so training on it teaches something false. Cumulative labels remain valid across
+    such windows; only targets are restricted.</dd>
+
+    <dt>Dilation vs closing</dt>
+    <dd>Two operations CLAUDE.md merges into one. <em>Dilation</em> grows each detection to approximate the
+    375&nbsp;m VIIRS footprint. <em>Closing</em> — dilate then erode — bridges gaps <em>between</em>
+    detections without pushing the outer boundary outward.
+    <div class="here"><b>in this project</b>Dilation alone left the Camp mask in 274 disconnected pieces. With
+    closing at radius 4, Creek, Caldor and Mosquito all land within 7% of official acreage.</div></dd>
+
+    <dt>Materialise vs crop on the fly</dt>
+    <dd>Whether to write every training tile to disk in advance, or store per-fire rasters and cut tiles at
+    load time.
+    <div class="here"><b>in this project</b>Materialising costs 254&nbsp;GB against 83&nbsp;GB free. Cropping on
+    the fly costs ~11&nbsp;GB — and makes overlapping tiles free rather than duplicated.</div></dd>
+
+    <dt>Extract-and-discard</dt>
+    <dd>Stream a large remote file, keep only the small region needed, delete the original. Retaining raw HRRR
+    for all 692 fires would cost ~204&nbsp;GB; the extracted windows are 4.52&nbsp;GB.</dd>
+  </dl>
+</section>
+
+<footer>
+  FireSpread &middot; companion to <code>CLAUDE.md</code> and <code>README.md</code>. Figures in
+  <code>figures/</code>; decisions and their measured justifications in the README.
+</footer>
+
+</main>
+</div>

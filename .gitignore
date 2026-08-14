@@ -1,0 +1,15 @@
+data/raw/**
+data/processed/**
+!data/**/.gitkeep
+checkpoints/
+runs/
+*.zarr/
+*.h5
+*.grib2
+*.idx
+.env
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.ipynb_checkpoints/

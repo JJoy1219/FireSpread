@@ -1,0 +1,141 @@
+# Baseline config — Phase 6 values from CLAUDE.md, plus Phase 1-3 pipeline params.
+
+paths:
+  raw_firms: data/raw/firms
+  raw_hrrr: data/raw/hrrr
+  raw_landfire: data/raw/landfire
+  raw_dem: data/raw/dem
+  samples: data/processed/samples
+  splits: data/processed/splits
+  norm_stats: configs/norm_stats.json
+
+region:
+  # California bounding box (lon_min, lat_min, lon_max, lat_max) — EPSG:4326
+  bbox: [-124.5, 32.5, -114.1, 42.0]
+  crs: "EPSG:5070"
+
+firms:
+  source: VIIRS_SNPP_SP      # SP = standard processing (archive). NRT only for <2 months old.
+  start_date: "2015-01-01"
+  end_date: "2023-12-31"
+  min_confidence: nominal    # one of: low, nominal, high
+  vegetation_fires_only: true  # FIRMS `type` == 0
+
+  # Spans where the sensor produced no data, so absence of detections does NOT
+  # mean absence of fire. Verified via `python -m pipeline.download audit`.
+  # Label generation must not build samples whose input or target window overlaps
+  # these, and events must not be linked across them.
+  # Decision: stay on S-NPP for label homogeneity and drop the gap, rather than
+  # splicing in NOAA-20 (which only exists from 2018-04 and would raise label
+  # density partway through the study period).
+  no_data_windows:
+    - ["2022-07-27", "2022-08-10"]   # S-NPP VIIRS outage; NOAA-20/MODIS saw fire here
+
+landfire:
+  layers: [FBFM40, CC, CH]     # band order in the output GeoTIFF follows this list
+  output_projection: 5070
+  aoi_margin_km: 20
+
+  # Versions that actually carry FBFM40/CC/CH, verified against /api/products.
+  # LF2014 ships disturbance only and LF2020 topography only, so there is no
+  # pre-2016 fuel map to pair with 2015-2016 fires.
+  available_fuel_versions: [LF2016, LF2022, LF2023, LF2024, LF2025]
+
+  # LANDFIRE rewrites fuels to reflect burn scars, so a version published AFTER a
+  # fire encodes that fire's own footprint — the model could read the target off
+  # the input. Never use "nearest year"; only versions strictly before ignition.
+  #   fixed        -> one snapshot for every fire (homogeneous across splits)
+  #   latest_prior -> newest version whose year precedes the fire (fresher, but the
+  #                   test split would span two fuel versions)
+  version_strategy: fixed
+  fixed_version: LF2016
+  # LF2016 includes disturbance through 2016, so 2015-2016 fires are mildly
+  # contaminated under either strategy. Flagged, not silently included.
+  contaminated_before_year: 2017
+
+events:
+  # Spatiotemporal clustering of detections into fire events
+  link_distance_km: 2.0      # ~5 VIIRS pixels at 375 m
+  link_time_hours: 96        # a fire can go quiet for up to 4 days between detections
+  min_detections: 25         # discard specks; roughly >= ~3 km^2 cumulative
+  min_timesteps: 3           # CLAUDE.md Phase 2: fires with < 3 timesteps are discarded
+
+labels:
+  # S-NPP is sun-synchronous: all detections land in two ~4 h bands per day (08-11Z
+  # and 19-22Z). At 6 h, 59.6% of windows contain no overpass at all and their targets
+  # are falsely empty. Measured empty rates: 3h 75.6%, 6h 59.6%, 12h 21.1%, 24h 8.9%.
+  # 24 h also matches Huot et al. 2022 "Next Day Wildfire Spread", so CSI is comparable.
+  window_hours: 24
+  # A 375 m VIIRS pixel is 3.75 cells at 100 m. Radius 1 spans +-1 cell and leaves a
+  # 1.75-cell gap between neighbouring detections, giving a stippled, non-contiguous
+  # perimeter. Radius 2 spans +-2, so 2+2 > 3.75 and blobs merge.
+  dilation_px: 2
+  # Dilation alone does not close the perimeter: detections along a front are sparser
+  # than one per 375 m pixel and scan geometry stretches spacing toward the swath edge.
+  # At dil=2 the Camp mask breaks into 274 components (fill ratio 0.74). Morphological
+  # CLOSING bridges those gaps without pushing the outer boundary out the way more
+  # dilation would. Calibrated against official acreage (Camp/Creek/Caldor/Mosquito):
+  #   dil=2         0.57-0.97x, 64-274 components
+  #   dil=4         0.87-1.15x,   1-5  components   (over-inflates)
+  #   dil=2 close=4 0.80-1.08x,   1-12 components   <- chosen
+  closing_px: 4
+  # Flag a window only when 2+ consecutive windows were missed — an actual outage,
+  # not one skipped overpass.
+  max_gap_hours: 48
+
+grid:
+  patch_size: 256
+  resolution_m: 100
+
+sampling:
+  # DECIDED (option A): tile the active perimeter instead of taking one crop centred
+  # on the perimeter centroid. A single centred 256 patch keeps only 58.5% of windows
+  # for the largest fire quintile, so megafires would be represented only while small.
+  # Samples are indexed by (fire_id, timestep, tile_index).
+  scheme: tiled
+  tile_stride_px: 128        # 50% overlap between neighbouring tiles
+  # Phase 8 clipping. Measured: 57.6% of tiles have target growth touching an edge, so
+  # dropping them would discard most of the data. Reconsidered and set to false, because
+  # under *tiling* an edge-touching target is not a label error — every pixel inside the
+  # tile genuinely burned, and growth continuing past the edge is captured by the
+  # neighbouring tile. The real cost is truncated context for edge pixels, and at 50%
+  # overlap every pixel is interior to some tile. Flag retained for analysis and for
+  # optional down-weighting of the outer ring in the loss.
+  drop_tiles_with_clipped_target: false
+  # Splits MUST group by fire_id: tiles of one fire sharing train and test would leak.
+  group_splits_by: fire_id
+
+  # Materialising 26,876 tiles as (3,12,256,256) costs 254 GB fp32 / 127 GB fp16 against
+  # 83 GB free. Store per-fire rasters instead and crop tiles in __getitem__: ~11 GB.
+  materialise_tiles: false
+
+storage:
+  # HRRR GRIBs are streamed, windowed, then deleted — retaining them costs ~204 GB.
+  keep_raw_hrrr_grib: false
+  hrrr_window_margin_cells: 20    # HRRR cells kept around each fire (3 km each)
+  hrrr_step_hours: 6              # 6 h matches the T, T-6h, T-12h feature set (~34 GB transfer)
+  # Per-fire 10 m DEM is ~160 GB across 692 fires; one statewide 100 m grid is ~0.5 GB.
+  dem_mode: statewide_100m
+
+model:
+  t_steps: 3                 # 3 x 24 h = 3 days of history
+  t_horizon_h: 24            # must match labels.window_hours
+  hidden_dims: [64, 128, 256]
+
+train:
+  # Measured on the 8 GB 4070: bs16 @256 peaks at 9.62 GB and spills to system RAM.
+  # bs8 peaks at 4.82 GB and fits. Accumulate x2 for an effective batch of 16.
+  batch_size: 8
+  grad_accum_steps: 2
+  lr: 1.0e-4
+  epochs: 100
+  early_stopping_patience: 10
+  loss: weighted_bce
+  grad_clip: 1.0
+  amp: true
+  device: cuda
+
+splits:
+  train_years: [2015, 2016, 2017, 2018, 2019]
+  val_years: [2020, 2021]
+  test_years: [2022, 2023]

@@ -1,0 +1,32 @@
+# Core modeling (already installed: torch 2.7.0+cu118, torchvision 0.22.0)
+torch>=2.7
+torchvision>=0.22
+
+# Array / tabular
+numpy>=2.0
+pandas>=2.2
+scipy>=1.14
+
+# Geospatial
+rasterio>=1.4
+pyproj>=3.7
+shapely>=2.0
+
+# Weather (HRRR GRIB2) — see note in README about Windows/eccodes
+xarray>=2025.1
+cfgrib>=0.9.15
+eccodes>=2.38
+
+# Storage
+zarr>=3.0
+h5py>=3.12
+
+# Visualization
+matplotlib>=3.10
+cartopy>=0.24
+
+# Download
+requests>=2.32
+boto3>=1.35
+tqdm>=4.67
+PyYAML>=6.0
