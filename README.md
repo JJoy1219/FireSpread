@@ -82,7 +82,7 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] Phase 3a — static feature stack (terrain + fuel), co-registration verified
 - [x] Phase 3b — tiled sample index, 661 samples over the MVP fires
 - [x] HRRR re-pull for the MVP fires — 499/501 hours (+4 gap-repair), 2.9 GB fetched, **23.8 MB stored**
-- [ ] Phase 3c — weather channels + Fosberg fuel moisture (HRRR is in place; features not written)
+- [x] Phase 3c — weather channels + Fosberg fuel moisture, 661/661 samples validated
 - [ ] Phase 4 — `WildfireDataset` with on-the-fly tile cropping
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
@@ -477,6 +477,97 @@ the rule in Phase 1.2.
 
 The store is therefore a **superset** of the needed set. `hrrr_coverage` counts membership rather
 than comparing lists, or repair hours would read as a coverage failure.
+
+## Phase 3c — weather channels
+
+```bash
+python -m pipeline.features weather --all-mvp
+```
+
+**661/661 samples produce finite, physical weather.** Nothing is materialised — a per-fire
+weather raster at 100 m would be ~2 GB for Creek alone against 23.8 MB for all five fires in
+native HRRR resolution, so `weather_tile` regrids on demand for the tile being cropped.
+
+| fire | samples | mean wind | RH | T | Fosberg 10-h |
+|---|---|---|---|---|---|
+| 2017_2405 | 10 | 5.2 m/s | 33.2% | 20.7 &deg;C | 8.3% |
+| Camp | 25 | 2.2 m/s | **16.3%** | 16.1 &deg;C | **4.8%** |
+| Creek | 522 | 3.9 m/s | 31.2% | 18.6 &deg;C | 8.1% |
+| Caldor | 87 | 3.9 m/s | 27.3% | 21.3 &deg;C | 7.1% |
+| Mosquito | 17 | 2.6 m/s | 32.4% | 23.7 &deg;C | 8.1% |
+
+Camp is the driest fire with the lowest fuel moisture by a wide margin, which is the correct
+physical ordering.
+
+### Regridding is an exact affine, not a scattered interpolation
+
+Projecting the stored per-cell lon/lat through the standard HRRR Lambert CRS reproduces a
+**regular 3000 m grid to within 0.7 m** — float32 coordinate precision. So the 3 km to 100 m
+resample is fire grid -> EPSG:5070 -> lon/lat -> HRRR Lambert -> fractional index, then bilinear.
+`hrrr_affine` re-checks the regularity per fire and raises if it fails, which is what would catch
+a wrong projection immediately.
+
+Bilinear, not nearest: at a 30x resolution jump nearest-neighbour leaves 3 km plateaus that the
+model would learn as terrain edges. Measured on a Camp tile, **0.00% of adjacent 100 m cells are
+identical** (nearest-neighbour would be ~97%), median step 0.012 m/s.
+
+Wind is interpolated as **u/v components**, never as speed and direction — direction wraps at
+0/360, the same discontinuity aspect already encodes as sin/cos to avoid. Fosberg is computed
+**after** regridding for the same class of reason: it is nonlinear in T and RH, so evaluating it
+at 3 km and interpolating the result would smear exactly the dry extremes that drive spread.
+
+### Verified: the Camp Fire's full meteorological arc in one tensor
+
+Sample at T = 2018-11-11 00z, so step 0 is the window ending 11-09 — inside the offshore event:
+
+| step | wind | RH | Fosberg |
+|---|---|---|---|
+| 0 (oldest, 11-09) | ENE 45-69&deg; at 12-17 mph | 7.7% | **2.4%** |
+| 1 (11-10) | lag 12h ENE 14 mph -> lag 0h **SW 238&deg;** | 10.6% | 3.5% |
+| 2 (most recent, 11-11) | SW/NW, light | 21.1% | 6.0% |
+
+Step 0 is Jarbo Gap at full intensity with fuel moisture at 2.4%. Step 1 captures the **wind
+reversal inside a single step's lags**. That is the Phase 8 wind-shift failure mode, and it is
+visible only because of the 6 h lag structure — at 24 h sampling it would appear as 12 mph ENE
+becoming 4 mph SW with nothing in between. This validates the temporal indexing and the regrid
+together.
+
+### Channel list — `C=12` in CLAUDE.md does not hold
+
+Pinned in `model.channels`, which the feature builder, `norm_stats.json` and the Dataset's flip
+augmentation all index into. CLAUDE.md declares `C=12`, but its own table lists 14 rows and omits
+`cc`, `tpi`, `elevation` and Fosberg — all of which the pipeline builds or the "Derived Features"
+section requires. The real count is **17 continuous + fuel**, embedded at 8 dims rather than
+one-hot over 40 (29 classes observed, and the codes are not ordinal).
+
+Each sequence step is a self-contained weather snapshot with its own 6 h history: step k is the
+window ending at `T - k*window_hours`, and its lags are relative to *that step's* time, not the
+sample's T. A sample therefore spans `window_hours*(t_steps-1) + 12 h` = **60 h** of weather.
+
+### Elevation is centred per fire
+
+`model.elevation_mode: fire_centred`, with `raw` and `none` as ablation arms. Variance
+decomposition over all 661 tiles:
+
+| channel | within-tile sd | between-tile sd | % variance between |
+|---|---|---|---|
+| **elevation** | **413.31** | **498.56** | **59.3%** |
+| slope | 8.22 | 1.45 | 3.0% |
+| aspect_sin / cos | 0.71 / 0.69 | 0.06 / 0.08 | 0.6% / 1.2% |
+| tpi | 21.57 | 0.10 | 0.0% |
+| cc | 18.13 | 8.27 | 17.2% |
+| ch | 10.38 | 4.20 | 14.1% |
+
+Elevation is the only static channel whose variance is mostly *between* tiles, which makes its
+absolute level a per-fire identity handle — and with Creek alone contributing 522 of 661 MVP
+samples, that is a memorisation pathway rather than terrain information. But its within-tile sd
+is 413 m, so it is emphatically **not** a flat offset: dropping it outright would discard the
+km-scale valley-to-ridge gradient that the 300 m TPI cannot see, and which is exactly the scale
+upslope runs happen at. Centring per fire keeps that gradient and drops the identity component.
+Per *fire* rather than per tile so overlapping tiles stay consistent for the same ground.
+
+Caveat worth keeping: the 5-fire measurement overstates the identity risk relative to the full
+622-fire archive, where elevation bands overlap far more. Hence the ablation arms.
 
 ## Storage budget — do NOT materialise samples
 

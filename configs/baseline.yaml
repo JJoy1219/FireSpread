@@ -123,6 +123,51 @@ model:
   t_horizon_h: 24            # must match labels.window_hours
   hidden_dims: [64, 128, 256]
 
+  # Authoritative channel order. The feature builder, norm_stats.json and the
+  # Dataset's flip augmentation all key off this list by index, so it must not be
+  # reordered without recomputing norm stats.
+  #
+  # CLAUDE.md Phase 3 declares C=12, but its own channel table lists 14 rows and
+  # omits cc, tpi, elevation and Fosberg -- all of which the pipeline builds or the
+  # "Derived Features" section requires. The real count is 17 continuous plus fuel.
+  #
+  # Each sequence step is a self-contained weather snapshot with its own 6 h history:
+  # step k is the label window ending at T - k*window_hours, and its wind lags are
+  # relative to *that step's* time, not the sample's T. So a sample spans
+  # window_hours*(t_steps-1) + 12 h = 60 h of weather.
+  channels:
+    - burn_mask            # labels, binary, cumulative up to this step
+    - u10_lag0             # wind U at this step's time
+    - u10_lag6             #   ... 6 h earlier
+    - u10_lag12            #   ... 12 h earlier
+    - v10_lag0             # wind V, same three lags
+    - v10_lag6
+    - v10_lag12
+    - rh2m                 # at this step's time
+    - t2m
+    - fosberg_10h          # dead fuel moisture, derived from t2m + rh2m
+    - elevation_centred    # per-fire mean removed -- see elevation_mode
+    - slope
+    - aspect_sin
+    - aspect_cos
+    - tpi
+    - cc
+    - ch
+  # Fuel is categorical and rides alongside as an int index, embedded in the model
+  # rather than concatenated here. One-hot over 40 classes would be mostly empty
+  # (29 classes observed) and the raw codes are not ordinal (91 urban, 101 grass,
+  # 165 timber litter), so an index fed as a number asserts an order that is meaningless.
+  fuel_embed_dim: 8
+
+  # Ablation switch for the elevation channel. Measured over the 661 MVP tiles,
+  # elevation is the only static channel whose variance is mostly *between* tiles
+  # (59.3%; every other channel is under 18%), which makes its absolute level a
+  # per-fire identity handle rather than terrain information. Centring per fire
+  # keeps the within-patch gradient -- including the km-scale valley-to-ridge rise
+  # that the 300 m TPI cannot see -- and drops the identity component.
+  #   fire_centred | raw | none
+  elevation_mode: fire_centred
+
 train:
   # Measured on the 8 GB 4070: bs16 @256 peaks at 9.62 GB and spills to system RAM.
   # bs8 peaks at 4.82 GB and fits. Accumulate x2 for an effective batch of 16.

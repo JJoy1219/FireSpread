@@ -113,7 +113,19 @@ Goal: for each fire event and timestep T, produce a binary raster of burned vs. 
 
 All layers resampled to **100m resolution, EPSG:5070**, cropped to a **256x256 pixel patch** centered on the fire's active perimeter centroid at time T.
 
-### Per-sample input tensor shape: `(T_steps=3, C=12, 256, 256)`
+### Per-sample input tensor shape: `(T_steps=3, C=17 + fuel embedding, 256, 256)`
+
+> **Superseded — `C=12` was wrong.** The table below lists 14 rows, and omits canopy cover,
+> TPI, elevation and Fosberg moisture, all of which this document requires elsewhere. The
+> authoritative channel list now lives in `model.channels` in `configs/baseline.yaml`; that
+> is what the feature builder, `norm_stats.json` and the Dataset index into. See the Phase 3c
+> section of the README for the count and the elevation-centring rationale.
+>
+> **Sequence semantics.** Step *k* is the label window ending at `T - k*window_hours`, and its
+> wind lags are relative to *that step's* time, not the sample's T. A sample therefore spans
+> `window_hours*(t_steps-1) + 12 h` = 60 h of weather. The alternative reading — lags always
+> relative to T — would make all three steps carry identical wind and leave the ConvLSTM with
+> no weather variation across its recurrence.
 
 | Channel | Source | Notes |
 |---|---|---|

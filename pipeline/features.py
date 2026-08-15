@@ -10,11 +10,14 @@ Two halves:
 * `build_index`  — enumerates (fire_id, timestep, tile) samples over the active
   perimeter, which is the option-A tiling scheme (see README).
 
-The weather half is deliberately not here yet: 24 h windows with `t_steps: 3` need HRRR
-from T-48h, and the current MVP pull only covers T-12h to T+24h. See `hrrr_coverage`.
+* `weather_tile` — regrids the stored HRRR window onto a tile of that same grid and
+  derives Fosberg fuel moisture. Computed on demand rather than materialised: a
+  per-fire weather raster would be ~2 GB for Creek alone, against 23.8 MB for all
+  five fires in native HRRR resolution.
 
-    python -m pipeline.features static --all-mvp
-    python -m pipeline.features index --all-mvp
+    python -m pipeline.features static  --all-mvp
+    python -m pipeline.features index   --all-mvp
+    python -m pipeline.features weather --all-mvp   # validate the weather path
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import pandas as pd
 import rasterio
 import zarr
 from affine import Affine
+from pyproj import Transformer
 from rasterio.warp import Resampling, reproject
 from scipy.ndimage import uniform_filter
 
@@ -43,6 +47,15 @@ FUEL_GROUPS = {
     "timber-litter": (181, 189), "slash": (201, 209),
 }
 CONT_CHANNELS = ["elevation", "slope", "aspect_sin", "aspect_cos", "tpi", "cc", "ch"]
+
+# HRRR CONUS Lambert Conformal. Verified rather than assumed: projecting the stored
+# per-cell lon/lat through this CRS reproduces a regular 3000 m grid to within 0.7 m,
+# which is float32 coordinate precision. `hrrr_affine` re-checks it per fire.
+HRRR_LCC = ("+proj=lcc +lat_0=38.5 +lon_0=-97.5 +lat_1=38.5 +lat_2=38.5 "
+            "+x_0=0 +y_0=0 +R=6371229 +units=m +no_defs")
+WEATHER_CHANNELS = ["u10_lag0", "u10_lag6", "u10_lag12",
+                    "v10_lag0", "v10_lag6", "v10_lag12",
+                    "rh2m", "t2m", "fosberg_10h"]
 
 
 def label_grid(fire_id: str) -> tuple[Affine, int, int, str]:
@@ -193,6 +206,175 @@ def hrrr_coverage(fire_id: str, cfg: dict) -> dict:
     }
 
 
+def hrrr_affine(lon: np.ndarray, lat: np.ndarray) -> tuple[float, float, float, float]:
+    """Fit the HRRR window's regular grid in Lambert coordinates: (x0, y0, dx, dy).
+
+    Raises if the fit is not regular, which is the check that `HRRR_LCC` is the right
+    projection — a wrong CRS shows up immediately as a non-constant step.
+    """
+    tf = Transformer.from_crs("EPSG:4326", HRRR_LCC, always_xy=True)
+    x, y = tf.transform(lon, lat)
+    dx = float(np.mean(np.diff(x, axis=1)))
+    dy = float(np.mean(np.diff(y, axis=0)))
+    resid = max(float(np.abs(np.diff(x, axis=1) - dx).max()),
+                float(np.abs(np.diff(y, axis=0) - dy).max()))
+    if resid > 5.0 or not (2000 < abs(dx) < 4000):
+        raise SystemExit(f"HRRR window is not regular in {HRRR_LCC!r} "
+                         f"(step {dx:.1f}/{dy:.1f} m, residual {resid:.2f} m)")
+    return float(x[0, 0]), float(y[0, 0]), dx, dy
+
+
+def hrrr_index_grid(fire_id: str, cfg: dict, row0: int, col0: int,
+                    patch: int) -> tuple[np.ndarray, np.ndarray]:
+    """Fractional (row, col) into the HRRR window for every cell of one tile.
+
+    Fire grid -> EPSG:5070 metres -> lon/lat -> HRRR Lambert -> fractional index.
+    Done per tile rather than per fire because regridding a whole fire at 100 m for
+    all 9 wind times would cost ~120 MB per sample for a fire the size of Creek.
+    """
+    tr, H, W, crs = label_grid(fire_id)
+    g = zarr.open_group(ROOT / cfg["paths"]["hrrr_windows"] / f"{fire_id}.zarr", mode="r")
+    x0, y0, dx, dy = hrrr_affine(np.asarray(g["lon"]), np.asarray(g["lat"]))
+
+    rows = np.arange(row0, row0 + patch) + 0.5
+    cols = np.arange(col0, col0 + patch) + 0.5
+    cc, rr = np.meshgrid(cols, rows)
+    xs, ys = tr * (cc, rr)                       # EPSG:5070 cell centres
+
+    tf = Transformer.from_crs(crs, HRRR_LCC, always_xy=True)
+    hx, hy = tf.transform(xs, ys)
+    return (hy - y0) / dy, (hx - x0) / dx
+
+
+def bilinear(cube: np.ndarray, r: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Sample `(C, ny, nx)` at fractional indices, clamped at the window edge."""
+    ny, nx = cube.shape[-2:]
+    r = np.clip(r, 0, ny - 1.001)
+    c = np.clip(c, 0, nx - 1.001)
+    r0, c0 = np.floor(r).astype(int), np.floor(c).astype(int)
+    fr, fc = (r - r0)[None], (c - c0)[None]
+    return (cube[:, r0, c0] * (1 - fr) * (1 - fc) + cube[:, r0, c0 + 1] * (1 - fr) * fc
+            + cube[:, r0 + 1, c0] * fr * (1 - fc) + cube[:, r0 + 1, c0 + 1] * fr * fc)
+
+
+def fosberg_10h(t_k: np.ndarray, rh: np.ndarray) -> np.ndarray:
+    """10-h dead fuel moisture from the Fosberg equilibrium relations.
+
+    Piecewise in RH with a temperature correction, defined in Fahrenheit, so the
+    kelvin HRRR field is converted here. Computed *after* regridding: the relation is
+    nonlinear, so evaluating it on the 3 km grid and interpolating the result is not
+    the same as interpolating the inputs, and would smear the dry extremes that matter.
+    """
+    t_f = (t_k - 273.15) * 9.0 / 5.0 + 32.0
+    rh = np.clip(rh, 0.0, 100.0)
+    m = np.where(
+        rh < 10,
+        0.03229 + 0.281073 * rh - 0.000578 * rh * t_f,
+        np.where(
+            rh < 50,
+            2.22749 + 0.160107 * rh - 0.014784 * t_f,
+            21.0606 + 0.005565 * rh**2 - 0.00035 * rh * t_f - 0.483199 * rh,
+        ),
+    )
+    # 1-h equilibrium -> 10-h timelag: the standard NFDRS damping toward equilibrium.
+    return np.clip(m * 1.28, 1.0, 40.0).astype("float32")
+
+
+def _hour_cube(fire_id: str, cfg: dict) -> tuple[np.ndarray, dict[str, int], np.ndarray]:
+    g = zarr.open_group(ROOT / cfg["paths"]["hrrr_windows"] / f"{fire_id}.zarr", mode="r")
+    filled = np.asarray(g["filled"])
+    return np.asarray(g["data"]), {s: i for i, s in enumerate(g.attrs["times"])}, filled
+
+
+def _hour_field(data, pos, filled, t: pd.Timestamp) -> np.ndarray | None:
+    """One hour's `(4, ny, nx)` field, interpolating an isolated gap from +/-1 h.
+
+    The gap rule from Phase 1.2. The fetcher guarantees a missing hour has its +/-1 h
+    neighbours present, so this interpolates across 2 h rather than the 12 h a 6-hourly
+    set would otherwise force. Returns None when the hole is too wide to bridge, and
+    the caller drops the sample.
+    """
+    i = pos.get(f"{t:%Y%m%d_%H}z")
+    if i is not None and filled[i]:
+        return data[i]
+    lo = hi = None
+    for dh in range(1, 4):
+        j = pos.get(f"{t - pd.Timedelta(hours=dh):%Y%m%d_%H}z")
+        if lo is None and j is not None and filled[j]:
+            lo = (dh, data[j])
+        k = pos.get(f"{t + pd.Timedelta(hours=dh):%Y%m%d_%H}z")
+        if hi is None and k is not None and filled[k]:
+            hi = (dh, data[k])
+    if lo is None or hi is None:
+        return None
+    w = lo[0] / (lo[0] + hi[0])
+    return lo[1] * (1 - w) + hi[1] * w
+
+
+def weather_tile(fire_id: str, t_index: int, cfg: dict, row0: int, col0: int,
+                 patch: int | None = None) -> np.ndarray | None:
+    """`(t_steps, len(WEATHER_CHANNELS), patch, patch)` for one sample.
+
+    Step k is the label window ending at T - k*window_hours, and its wind lags are
+    relative to that step's own time -- so the sample spans
+    window_hours*(t_steps-1) + 12 h of weather. See `model.channels` in the config.
+    """
+    patch = patch or int(cfg["grid"]["patch_size"])
+    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    times = [pd.Timestamp(t) for t in g.attrs["window_times"]]
+    window_h = int(g.attrs["window_hours"])
+    t_steps = int(cfg["model"]["t_steps"])
+
+    data, pos, filled = _hour_cube(fire_id, cfg)
+    r, c = hrrr_index_grid(fire_id, cfg, row0, col0, patch)
+
+    out = np.zeros((t_steps, len(WEATHER_CHANNELS), patch, patch), dtype="float32")
+    for k in range(t_steps):
+        base = times[t_index] - pd.Timedelta(hours=window_h * k)
+        lags = []
+        for lag in (0, 6, 12):
+            f = _hour_field(data, pos, filled, base - pd.Timedelta(hours=lag))
+            if f is None:
+                return None
+            lags.append(bilinear(f, r, c))       # (4, patch, patch): u, v, t2m, rh
+        step = t_steps - 1 - k                   # oldest first along the sequence axis
+        out[step, 0:3] = [l[0] for l in lags]    # u10 at lag 0, 6, 12
+        out[step, 3:6] = [l[1] for l in lags]    # v10
+        out[step, 6] = lags[0][3]                # rh at this step's own time
+        out[step, 7] = lags[0][2]                # t2m
+        out[step, 8] = fosberg_10h(lags[0][2], lags[0][3])
+    return out
+
+
+def static_tile(fire_id: str, cfg: dict, row0: int, col0: int,
+                patch: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Static channels and the fuel index for one tile, honouring `elevation_mode`.
+
+    `fire_centred` subtracts the fire's own mean elevation. Measured over the 661 MVP
+    tiles, 59.3% of elevation's variance is *between* tiles rather than within them --
+    far the highest of any static channel -- so its absolute level acts as a per-fire
+    identity handle. Centring keeps the within-patch gradient, including the km-scale
+    rise that the 300 m TPI cannot see, and drops the identity component. The mean is
+    taken over the whole fire, not the tile, so overlapping tiles stay consistent.
+    """
+    patch = patch or int(cfg["grid"]["patch_size"])
+    g = zarr.open_group(ROOT / "data/processed/features" / f"{fire_id}.zarr", mode="r")
+    chans = list(g.attrs["channels"])
+    sl = (slice(row0, row0 + patch), slice(col0, col0 + patch))
+    stack = np.asarray(g["static"][:, sl[0], sl[1]]).astype("float32")
+    fuel = np.asarray(g["fuel"][sl]).astype("int16")
+
+    mode = str(cfg["model"].get("elevation_mode", "fire_centred"))
+    ei = chans.index("elevation")
+    if mode == "fire_centred":
+        stack[ei] -= float(np.asarray(g["static"][ei]).mean())
+    elif mode == "none":
+        stack = np.delete(stack, ei, axis=0)
+    elif mode != "raw":
+        raise SystemExit(f"unknown model.elevation_mode: {mode!r}")
+    return stack, fuel
+
+
 def tile_origins(lo: int, hi: int, n: int, patch: int, stride: int) -> list[int]:
     """Tile origins along one axis covering [lo, hi], clamped inside [0, n - patch].
 
@@ -272,7 +454,7 @@ def main() -> None:
     from pipeline.hrrr import pick_mvp_fires
 
     p = argparse.ArgumentParser(description="Phase 3 feature stack and sample index.")
-    p.add_argument("what", choices=["static", "index", "hrrr-check"])
+    p.add_argument("what", choices=["static", "index", "hrrr-check", "weather"])
     p.add_argument("--config", default="configs/baseline.yaml")
     p.add_argument("--events", default="data/processed/fire_events.csv")
     p.add_argument("--fire-id")
@@ -298,6 +480,37 @@ def main() -> None:
                       f"{r['mb']} MB")
             else:
                 print(f"{fid}  {r['status']}")
+
+    elif a.what == "weather":
+        # Weather is never materialised, so "building" it means proving every sample in
+        # the index can produce a finite, physical tensor on demand.
+        idx = pd.read_parquet(ROOT / "data/processed/sample_index.parquet")
+        rows = []
+        for fid in ids:
+            sub = idx[idx["fire_id"] == fid]
+            ok = dropped = 0
+            stats = []
+            for _, s in sub.iterrows():
+                w = weather_tile(fid, int(s["t_index"]), cfg, int(s["row0"]), int(s["col0"]))
+                if w is None:
+                    dropped += 1
+                    continue
+                if not np.isfinite(w).all():
+                    raise SystemExit(f"{fid} t={s['t_index']} produced non-finite weather")
+                ok += 1
+                # Mean wind *speed*, not the speed of the mean vector -- averaging u and
+                # v first cancels opposing directions and reports a near-zero breeze.
+                stats.append([float(np.hypot(w[:, 0], w[:, 3]).mean()),
+                              float(w[:, 6].mean()), float(w[:, 7].mean()),
+                              float(w[:, 8].mean())])
+            m = np.array(stats).mean(axis=0)
+            rows.append({"fire_id": fid, "samples": len(sub), "ok": ok, "dropped": dropped,
+                         "wind_ms": round(m[0], 1), "rh_pct": round(m[1], 1),
+                         "t_c": round(m[2] - 273.15, 1), "fosberg_pct": round(m[3], 1)})
+        df = pd.DataFrame(rows)
+        print(df.to_string(index=False))
+        print(f"\n{df.ok.sum():,}/{df.samples.sum():,} samples produce weather "
+              f"({df.dropped.sum()} dropped on unbridgeable gaps)")
 
     elif a.what == "hrrr-check":
         rows = [hrrr_coverage(f, cfg) for f in ids]
