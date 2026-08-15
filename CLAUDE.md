@@ -248,6 +248,12 @@ Construct splits at the **fire level**, not the sample level:
 - `splits/val_fires.txt`: fire IDs from 2020-2021
 - `splits/test_fires.txt`: fire IDs from 2022-2023
 
+> **Superseded — these years do not work.** Measured on the built dataset they put 69.7% of
+> samples in validation against 21.7% in training: 2020 and 2021 are the two most extreme
+> seasons on record and tiling multiplies each megafire. The boundary is now
+> 2015-2020 / 2021 / 2022-2023, set in `sampling.split_years`, which keeps strict chronology
+> and fire-level grouping while giving train 63.7%. See the README for the trade-offs.
+
 Never mix timesteps from the same fire across splits.
 
 ### Metrics

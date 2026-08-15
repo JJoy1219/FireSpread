@@ -24,7 +24,23 @@ from torch.utils.data import Dataset
 from pipeline.download import ROOT, load_config
 from pipeline.features import WEATHER_CHANNELS, static_tile, weather_tile
 
-SPLIT_YEARS = {"train": (2015, 2019), "val": (2020, 2021), "test": (2022, 2023)}
+# Fallback only; `sampling.split_years` in the config is authoritative. See the note
+# there for why this is not the CLAUDE.md Phase 7 boundary.
+DEFAULT_SPLIT_YEARS = {"train": (2015, 2020), "val": (2021, 2021), "test": (2022, 2023)}
+
+
+def split_years(cfg: dict) -> dict[str, tuple[int, int]]:
+    raw = cfg.get("sampling", {}).get("split_years")
+    if not raw:
+        return dict(DEFAULT_SPLIT_YEARS)
+    years = {k: (int(v[0]), int(v[1])) for k, v in raw.items()}
+    if set(years) != set(DEFAULT_SPLIT_YEARS):
+        raise SystemExit(f"sampling.split_years must define {sorted(DEFAULT_SPLIT_YEARS)}")
+    spans = sorted(years.values())
+    for (a_lo, a_hi), (b_lo, b_hi) in zip(spans, spans[1:]):
+        if b_lo <= a_hi:
+            raise SystemExit(f"split_years overlap: {a_lo}-{a_hi} and {b_lo}-{b_hi}")
+    return years
 # Channels that must NOT be normalised: the burn mask is already the 0/1 the loss expects,
 # and rescaling it would put the model's own prediction target on a different scale from
 # the input it conditions on.
@@ -68,7 +84,7 @@ def write_splits(cfg: dict, events_csv: str = "data/processed/fire_events.csv") 
     out_dir.mkdir(parents=True, exist_ok=True)
 
     counts = {}
-    for name, (lo, hi) in SPLIT_YEARS.items():
+    for name, (lo, hi) in split_years(cfg).items():
         ids = sorted(ev.loc[(ev["year"] >= lo) & (ev["year"] <= hi), "fire_id"])
         (out_dir / f"{name}_fires.txt").write_text("\n".join(ids) + "\n")
         counts[name] = len(ids)
@@ -298,7 +314,7 @@ def run_checks(cfg: dict, split: str) -> None:
     assert torch.isfinite(s["input"]).all(), "non-finite values in input"
 
     # Splits must not share fires, or 50%-overlapping tiles leak across the boundary.
-    sets = {k: set(read_split(cfg, k)) for k in SPLIT_YEARS}
+    sets = {k: set(read_split(cfg, k)) for k in split_years(cfg)}
     for a_, b_ in (("train", "val"), ("train", "test"), ("val", "test")):
         assert not (sets[a_] & sets[b_]), f"{a_}/{b_} share fires"
     print(f"  splits disjoint: train {len(sets['train'])}, val {len(sets['val'])}, "

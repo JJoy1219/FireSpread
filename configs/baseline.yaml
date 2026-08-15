@@ -113,6 +113,22 @@ sampling:
   # Splits MUST group by fire_id: tiles of one fire sharing train and test would leak.
   group_splits_by: fire_id
 
+  # Chronological, but NOT the 2015-2019 / 2020-2021 / 2022-2023 boundary in CLAUDE.md
+  # Phase 7. Measured on the built dataset, that split put 69.7% of samples in validation
+  # against 21.7% in training: 2020 and 2021 are the two most extreme seasons on record,
+  # tiling multiplies each megafire into many tiles, and train additionally lost the most
+  # to weather gaps because 2015-2016 HRRR is least complete. Training on 22% while
+  # selecting models on 70% is not defensible.
+  #
+  # Moving 2020 into training gives 63.7 / 27.7 / 8.6, keeps strict chronology (so the
+  # temporal-generalisation claim survives) and keeps fire_id grouping intact.
+  # Cost to watch: validation is now a single season, 47 fires dominated by Dixie and
+  # Caldor, so val CSI is a narrower signal than the sample count suggests.
+  split_years:
+    train: [2015, 2020]
+    val: [2021, 2021]
+    test: [2022, 2023]
+
   # Materialising 26,876 tiles as (3,12,256,256) costs 254 GB fp32 / 127 GB fp16 against
   # 83 GB free. Store per-fire rasters instead and crop tiles in __getitem__: ~11 GB.
   materialise_tiles: false

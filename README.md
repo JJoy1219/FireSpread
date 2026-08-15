@@ -86,7 +86,7 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] Phase 4 — `WildfireDataset` with on-the-fly tile cropping, splits, norm stats
 - [x] Phase 5 — ConvLSTM U-Net + baseline U-Net, single-batch overfit test passes
 - [x] Full dataset construction, California 2015-2023 — **7,070 samples over 450 fires**
-- [ ] **Split imbalance needs a decision before training** — val is 3.2x train (see below)
+- [x] Split boundary moved to 2015-2020 / 2021 / 2022-2023 — train is now 63.7%, was 21.7%
 - [ ] Phase 6 — `train.py`: loop, CSI/IoU logging, checkpointing by validation CSI
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
@@ -735,27 +735,37 @@ The HRRR figure is the one worth noting: **5,850 unique calendar hours served 25
 *and* a target window, so 4 usable windows is the real floor. Of 105 fires with exactly 3,
 five yielded any sample. `sample_index.parquet`, not `keep`, is the authority on what is trainable.
 
-### The split is badly imbalanced — decide before training
+### Split boundary moved off the CLAUDE.md years
 
-| split | samples | share | fires |
-|---|---|---|---|
-| train | **1,537** | 21.7% | 210 |
-| val | **4,926** | 69.7% | 127 |
-| test | 607 | 8.6% | 113 |
+CLAUDE.md Phase 7 specifies 2015-2019 / 2020-2021 / 2022-2023. Measured on the built dataset that
+is unusable: it puts **69.7% of samples in validation against 21.7% in training**, because 2020 and
+2021 are the two most extreme seasons on record and tiling multiplies each megafire into many
+tiles. Train was hit twice over — it also lost the most to weather gaps (2,253 -> 1,537, -32%),
+since 2015-2016 HRRR is the least complete. Training on 22% while selecting models on 70% is not
+defensible.
 
-**Validation holds 3.2x the training data.** The chronological split puts 2020-2021 — the two
-most extreme seasons on record — in validation, and option-A tiling multiplies each megafire into
-many tiles. Train is hit twice over: it also lost the most to weather gaps (2,253 -> 1,537, -32%),
-because 2015-2016 HRRR is the least complete.
+Moving 2020 into training (`sampling.split_years`) keeps strict chronology, so the
+temporal-generalisation claim survives, and keeps `fire_id` grouping intact:
 
-This was flagged earlier in detection counts; in samples it is worse. Training on 22% of the data
-while selecting models on 70% of it is not a defensible setup, and headline test CSI over 607
-samples will be noisy. Options, none yet taken:
+| split | years | samples | share | fires | median positive | implied `pos_weight` | clipped |
+|---|---|---|---|---|---|---|---|
+| train | 2015-2020 | **4,507** | 63.7% | 290 | 0.247% | 404 | 34.5% |
+| val | 2021 | 1,956 | 27.7% | 47 | 0.339% | 294 | 44.2% |
+| test | 2022-2023 | 607 | 8.6% | 113 | 0.078% | 1,284 | 4.0% |
 
-- keep chronological (comparable to Huot et al., no leakage) and accept a small train set;
-- shift the boundary, e.g. train 2015-2020, val 2021, test 2022-2023;
-- stratify by fire size within years so megafires are spread across splits — this breaks strict
-  chronology but keeps `fire_id` grouping and fixes the imbalance directly.
+Train grew 2.9x, from 1,537 to 4,507.
+
+**Two costs to keep in view.** Validation is now a single season and only 47 fires, dominated by
+Dixie and Caldor, so val CSI is a narrower signal than 1,956 samples suggests — early stopping on
+it will be noisier than the count implies. And the test split is both small (607) and much
+sparser: its median positive fraction is 0.078% against 0.247% in training, a 5x harsher implied
+`pos_weight`, because 2022-2023 were mild seasons of mostly small fires. Test CSI will therefore
+run lower than validation CSI for reasons that have nothing to do with generalisation, so the two
+are not directly comparable. Report test metrics stratified by fire size.
+
+**Norm stats must be regenerated with any split change** — moving 2020 into training shifted the
+distribution measurably: RH 31.6% -> 28.5%, temperature 20.7 -> 23.3 &deg;C, Fosberg 8.08% -> 7.36%.
+That is the 2020 heat and drought entering the training set.
 
 ### Two HRRR data-quality findings
 
