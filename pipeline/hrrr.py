@@ -8,22 +8,31 @@ GRIB2 file, so the subset opens directly in cfgrib.
 
     hrrr.YYYYMMDD/conus/hrrr.tHHz.wrfsfcf00.grib2
 
+Each fire's GRIBs are cropped to a local window and written into a per-fire zarr, then
+deleted (`storage.keep_raw_hrrr_grib`). Retaining the GRIBs costs ~204 GB across the
+archive; the windows cost ~4.5 GB.
+
 Usage:
     python -m pipeline.hrrr --list-fires          # choose the MVP events
     python -m pipeline.hrrr --fire-id 2018_4037
     python -m pipeline.hrrr --all-mvp
+    python -m pipeline.hrrr --all-mvp --dry-run   # hours and MB, fetch nothing
 """
 
 from __future__ import annotations
 
 import argparse
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import boto3
+import numpy as np
 import pandas as pd
+import zarr
 from botocore import UNSIGNED
 from botocore.config import Config
+from pyproj import Transformer
 
 from pipeline.download import ROOT, load_config
 
@@ -35,6 +44,12 @@ FIELDS = {
     ("TMP", "2 m above ground"): "t2m",
     ("RH", "2 m above ground"): "rh2m",
 }
+# Names cfgrib gives these once decoded — note RH decodes as `r2`, not `rh2m`.
+CHANNELS = ["u10", "v10", "t2m", "r2"]
+# Feature spec (CLAUDE.md Phase 3): wind at T, T-6h, T-12h. Temperature and RH at T
+# only, but they ride along in the same messages so there is nothing to save by
+# fetching them on a different schedule.
+WIND_LAG_HOURS = (0, 6, 12)
 # HRRR on this bucket begins here; earlier fires would need ERA5 instead.
 HRRR_EPOCH = datetime(2014, 7, 30, tzinfo=timezone.utc)
 
@@ -100,46 +115,277 @@ def download_hour(dt: datetime, dest: Path, overwrite: bool = False) -> tuple[Pa
     return dest, dest.stat().st_size
 
 
+def needed_hours(fire_id: str, cfg: dict) -> pd.DatetimeIndex:
+    """The exact analysis hours the feature stack needs for one fire.
+
+    Driven by the label zarr's own window times so the weather can never span a
+    different period than the targets. For each usable window T the model sees
+    `t_steps` windows ending at T, and each of those needs wind at its own
+    T, T-6h, T-12h — so the needed set is
+
+        {w - k*window_hours - lag : w in windows, k < t_steps, lag in WIND_LAG_HOURS}
+
+    That is 3 hours per 24 h window, not the 4 a uniform 6-hourly grid would fetch:
+    the 18h-offset hour is never read by any feature. Hence ~25% less transfer than
+    the `storage.hrrr_step_hours` budget in the README assumed.
+    """
+    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    window_h = int(g.attrs["window_hours"])
+    usable = np.array(g.attrs["usable"], dtype=bool)
+    times = [pd.Timestamp(t) for t in g.attrs["window_times"]]
+    t_steps = int(cfg["model"]["t_steps"])
+
+    wanted: set[pd.Timestamp] = set()
+    for w, ok in zip(times, usable):
+        if not ok:
+            continue
+        for k in range(t_steps):
+            base = w - pd.Timedelta(hours=window_h * k)
+            for lag in WIND_LAG_HOURS:
+                wanted.add((base - pd.Timedelta(hours=lag)).floor("h"))
+    return pd.DatetimeIndex(sorted(wanted))
+
+
+def fire_window_bounds(fire_id: str, margin_km: float) -> tuple[float, float, float, float]:
+    """Fire raster bounds in lon/lat, padded by `margin_km`."""
+    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    a, b, c, d, e, f = g.attrs["transform"][:6]
+    _, H, W = g["burn_new"].shape
+    xs = [c, c + a * W]
+    ys = [f, f + e * H]
+    tf = Transformer.from_crs(g.attrs.get("crs", "EPSG:5070"), "EPSG:4326", always_xy=True)
+    corners = [tf.transform(x, y) for x in xs for y in ys]
+    lons = [p[0] for p in corners]
+    lats = [p[1] for p in corners]
+    dlat = margin_km / 111.0
+    dlon = margin_km / (111.0 * max(np.cos(np.radians(np.mean(lats))), 0.1))
+    return min(lons) - dlon, min(lats) - dlat, max(lons) + dlon, max(lats) + dlat
+
+
+def _grib_datasets(path: Path) -> list:
+    import cfgrib
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return cfgrib.open_datasets(str(path))
+
+
+def window_slice(path: Path, bounds: tuple[float, float, float, float]) -> tuple[slice, slice]:
+    """Index window into the HRRR grid covering `bounds`.
+
+    HRRR is Lambert Conformal with 2-D lat/lon, so a lon/lat box is not a rectangle in
+    index space; we take the bounding box of every cell inside it. Longitudes come in
+    the 0-360 convention and are folded to -180..180 first.
+    """
+    ds = _grib_datasets(path)[0]
+    lat = np.asarray(ds["latitude"])
+    lon = ((np.asarray(ds["longitude"]) + 180.0) % 360.0) - 180.0
+    lon_min, lat_min, lon_max, lat_max = bounds
+    inside = (lat >= lat_min) & (lat <= lat_max) & (lon >= lon_min) & (lon <= lon_max)
+    if not inside.any():
+        raise SystemExit(f"fire window {bounds} falls outside the HRRR domain")
+    ys, xs = np.where(inside)
+    return slice(int(ys.min()), int(ys.max()) + 1), slice(int(xs.min()), int(xs.max()) + 1)
+
+
+def window_lonlat(path: Path, sy: slice, sx: slice) -> tuple[np.ndarray, np.ndarray]:
+    """Cell-centre lon/lat for the cropped window, folded to -180..180.
+
+    Stored alongside the data because HRRR is Lambert Conformal: without the true
+    per-cell coordinates there is no way to resample onto the 100 m EPSG:5070 fire
+    grid, and interpolating the lon/lat bbox linearly is wrong by up to a cell.
+    """
+    ds = _grib_datasets(path)[0]
+    lat = np.asarray(ds["latitude"])[sy, sx].astype("float32")
+    lon = ((np.asarray(ds["longitude"])[sy, sx] + 180.0) % 360.0) - 180.0
+    return lon.astype("float32"), lat
+
+
+def extract_window(path: Path, sy: slice, sx: slice) -> np.ndarray:
+    """Crop one hour's GRIB to `(len(CHANNELS), ny, nx)` float32."""
+    found = {}
+    for ds in _grib_datasets(path):
+        for name in ds.data_vars:
+            if name in CHANNELS:
+                found[name] = np.asarray(ds[name])[sy, sx]
+    missing = [c for c in CHANNELS if c not in found]
+    if missing:
+        raise SystemExit(f"{path.name}: GRIB decoded without {missing}; got {sorted(found)}")
+    return np.stack([found[c] for c in CHANNELS]).astype("float32")
+
+
+def _parse_stamp(s: str) -> pd.Timestamp:
+    return pd.Timestamp(datetime.strptime(s[:-1], "%Y%m%d_%H"), tz="UTC")
+
+
+def _sync_store(grp, stamps: list[str], bounds: tuple, overwrite: bool = False) -> None:
+    """Make the store hold exactly `stamps`, carrying over rows already fetched.
+
+    Needed because gap repair grows the hour list after the fact; rows are matched by
+    timestamp, never by position, so re-syncing never silently reindexes data.
+    """
+    old_times = list(grp.attrs.get("times", []))
+    if not overwrite and old_times == stamps and "filled" in grp:
+        return
+
+    new_filled = np.zeros(len(stamps), dtype=bool)
+    if not overwrite and "data" in grp and "filled" in grp:
+        old_filled = np.asarray(grp["filled"])
+        old = grp["data"]
+        pos = {s: i for i, s in enumerate(old_times)}
+        buf = np.zeros((len(stamps), *old.shape[1:]), dtype="float32")
+        for ni, s in enumerate(stamps):
+            oi = pos.get(s)
+            if oi is not None and oi < len(old_filled) and bool(old_filled[oi]):
+                buf[ni] = old[oi]
+                new_filled[ni] = True
+        grp.create_array("data", shape=buf.shape, dtype="float32",
+                         chunks=(1, *old.shape[1:]), overwrite=True)[:] = buf
+
+    grp.create_array("filled", shape=(len(stamps),), dtype="bool",
+                     overwrite=True)[:] = new_filled
+    grp.attrs["times"] = stamps
+    grp.attrs["channels"] = CHANNELS
+    grp.attrs["bounds"] = list(bounds)
+
+
+def _gap_neighbours(stamps: list[str], filled: np.ndarray) -> set[str]:
+    """The +/-1 h hours bracketing every hour that came back missing.
+
+    The stored set is 6-hourly, so without this an isolated hole would have to be
+    interpolated across 12 h — far too long an assumption for 10 m wind. Two extra
+    requests per hole buys a 2 h bracket instead.
+    """
+    out: set[str] = set()
+    for s, f in zip(stamps, filled):
+        if f:
+            continue
+        t = _parse_stamp(s)
+        for dh in (-1, 1):
+            out.add(f"{t + pd.Timedelta(hours=dh):%Y%m%d_%H}z")
+    return out - set(stamps)
+
+
 def download_event(
     fire_id: str,
-    start: datetime,
-    out_root: Path,
-    lead_hours: int = 12,
-    max_hours: int = 24,
+    cfg: dict,
     overwrite: bool = False,
+    dry_run: bool = False,
+    limit: int | None = None,
+    repair_rounds: int = 2,
 ) -> dict:
-    """Hourly HRRR from T-lead to T+max_hours for one fire.
+    """Fetch every hour the feature stack needs for one fire, window it, store it.
 
-    Defaults follow CLAUDE.md Phase 1.2 (T-12h to T+24h), which is the right window
-    for the MVP feature-stack test. Full dataset construction needs the whole active
-    period instead — these fires burn for weeks, not 24 hours.
+    Resumable: the zarr is allocated for the full needed span up front and a `filled`
+    flag marks which hours are populated, so a rerun costs only what is still absent.
+    Replaces the old fixed T-12h..T+24h window, which covered under 5% of what 24 h
+    windows with `t_steps: 3` actually require.
+
+    Any hour missing from the archive automatically pulls its +/-1 h neighbours so the
+    gap can be interpolated across 2 h rather than 12. Bounded by `repair_rounds` so a
+    long outage cannot walk outwards indefinitely.
     """
-    if start < HRRR_EPOCH:
+    hours = needed_hours(fire_id, cfg)
+    if len(hours) == 0:
+        return {"fire_id": fire_id, "error": "no usable label windows"}
+    if hours[0].to_pydatetime().replace(tzinfo=timezone.utc) < HRRR_EPOCH:
         return {"fire_id": fire_id, "error": f"before HRRR epoch {HRRR_EPOCH:%Y-%m-%d}"}
 
-    t0 = start.replace(minute=0, second=0, microsecond=0) - timedelta(hours=lead_hours)
-    hours = [t0 + timedelta(hours=i) for i in range(lead_hours + max_hours + 1)]
-    out_dir = out_root / fire_id
+    store = ROOT / cfg["paths"]["hrrr_windows"] / f"{fire_id}.zarr"
+    bounds = fire_window_bounds(fire_id, float(cfg["storage"]["hrrr_window_margin_cells"]) * 3.0)
 
-    ok = bytes_total = 0
-    missing = []
-    for i, dt in enumerate(hours, 1):
-        res = download_hour(dt, out_dir / f"{dt:%Y%m%d_%H}z.grib2", overwrite)
-        if res is None:
-            missing.append(dt)
-            continue
-        ok += 1
-        bytes_total += res[1]
-        if i % 12 == 0 or i == len(hours):
-            print(f"  {fire_id}  {i:>3}/{len(hours)} hours  {bytes_total/1e6:6.1f} MB")
+    if dry_run:
+        return {"fire_id": fire_id, "hours_requested": len(hours), "hours_ok": 0,
+                "missing": [], "mb": 0.0, "dir": str(store),
+                "span": f"{hours[0]:%Y-%m-%d %H}z..{hours[-1]:%Y-%m-%d %H}z"}
 
+    tmp_dir = ROOT / cfg["paths"]["raw_hrrr"] / fire_id
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    keep_grib = bool(cfg["storage"].get("keep_raw_hrrr_grib", False))
+
+    grp = zarr.open_group(store, mode="a")
+    stamps = [f"{t:%Y%m%d_%H}z" for t in hours]
+    _sync_store(grp, stamps, bounds, overwrite)
+
+    def fill(label: str = "") -> tuple[int, int]:
+        """Fetch every unfilled hour currently in the store. Returns (ok, bytes)."""
+        nonlocal stamps
+        filled = grp["filled"]
+        data = grp["data"] if "data" in grp and grp["data"].shape[0] == len(stamps) else None
+        todo = [i for i in range(len(stamps)) if not bool(filled[i])]
+        if limit is not None:
+            todo = todo[:limit]
+
+        sy = sx = None
+        ok = nbytes = 0
+        for n, i in enumerate(todo, 1):
+            dt = _parse_stamp(stamps[i]).to_pydatetime()
+            grib = tmp_dir / f"{stamps[i]}.grib2"
+            res = download_hour(dt, grib, overwrite=True)
+            if res is None:
+                continue
+            nbytes += res[1]
+
+            if sy is None:
+                sy, sx = window_slice(grib, bounds)
+                if "lon" not in grp:
+                    lon, lat = window_lonlat(grib, sy, sx)
+                    grp.create_array("lon", shape=lon.shape, dtype="float32",
+                                     overwrite=True)[:] = lon
+                    grp.create_array("lat", shape=lat.shape, dtype="float32",
+                                     overwrite=True)[:] = lat
+            arr = extract_window(grib, sy, sx)
+            if data is None:
+                data = grp.create_array(
+                    "data", shape=(len(stamps), *arr.shape), dtype="float32",
+                    chunks=(1, len(CHANNELS), *arr.shape[1:]), overwrite=True,
+                )
+            data[i] = arr
+            filled[i] = True
+            ok += 1
+
+            if not keep_grib:
+                grib.unlink(missing_ok=True)
+                for leftover in tmp_dir.glob(f"{stamps[i]}.grib2.*.idx"):
+                    leftover.unlink(missing_ok=True)
+            if n % 25 == 0 or n == len(todo):
+                print(f"  {fire_id}{label}  {n:>4}/{len(todo)} hours  {nbytes/1e6:7.1f} MB fetched")
+        return ok, nbytes
+
+    ok, bytes_total = fill()
+
+    # Any hour the archive does not have pulls its immediate neighbours, so Phase 3c
+    # interpolates across 2 h instead of the 12 h the 6-hourly grid would otherwise force.
+    repaired: list[str] = []
+    for rnd in range(repair_rounds if limit is None else 0):
+        extra = _gap_neighbours(stamps, np.asarray(grp["filled"]))
+        if not extra:
+            break
+        print(f"  {fire_id}  gap repair round {rnd + 1}: fetching {len(extra)} neighbour hours")
+        repaired.extend(sorted(extra))
+        stamps = sorted(set(stamps) | extra, key=_parse_stamp)
+        _sync_store(grp, stamps, bounds)
+        r_ok, r_bytes = fill(" repair")
+        ok += r_ok
+        bytes_total += r_bytes
+
+    filled = np.asarray(grp["filled"])
+    missing = [s for s, f in zip(stamps, filled) if not f]
+    grp.attrs["missing"] = missing
+    grp.attrs["repair_hours"] = sorted(set(repaired) - set(missing))
+    if not keep_grib and tmp_dir.exists() and not any(tmp_dir.iterdir()):
+        tmp_dir.rmdir()
+
+    stored = sum(p.stat().st_size for p in store.rglob("*") if p.is_file()) / 1e6
     return {
         "fire_id": fire_id,
-        "hours_requested": len(hours),
-        "hours_ok": ok,
+        "hours_requested": len(stamps),
+        "hours_ok": int(filled.sum()),
         "missing": missing,
+        "repaired": grp.attrs["repair_hours"],
         "mb": round(bytes_total / 1e6, 1),
-        "dir": str(out_dir),
+        "stored_mb": round(stored, 1),
+        "dir": str(store),
     }
 
 
@@ -148,16 +394,20 @@ def pick_mvp_fires(events_csv: Path, n: int = 5) -> pd.DataFrame:
     ev = pd.read_csv(events_csv, parse_dates=["start", "end"])
     ev = ev[ev["keep"] & ~ev["touches_no_data"]]
     chosen = [
+        "2017_2405",  # median-sized 2017 Sierra fire, so the set is not all megafires
         "2018_4037",  # Camp — extreme wind-driven run, tests the Phase 8 wind-shift mode
         "2020_3779",  # Creek — megafire, plume-dominated, many tiles
         "2021_3526",  # Caldor — long duration, crossed the Sierra crest
         "2022_3298",  # Mosquito — test-split year
     ]
+    # The fifth fire used to be picked as the median-sized 2017 event at call time.
+    # That is not deterministic across config changes: `n_timesteps` depends on
+    # `labels.window_hours`, so the 6 h -> 24 h switch moved the median off 2017_2405
+    # and silently orphaned its already-downloaded LANDFIRE/DEM tiles. Pinned instead.
     out = ev[ev["fire_id"].isin(chosen)].copy()
-    # Fifth: a median-sized 2017 fire, so the set is not all megafires.
-    pool = ev[(ev["year"] == 2017) & (ev["n_timesteps"] >= 12)].copy()
-    med = pool["n_detections"].median()
-    out = pd.concat([out, pool.iloc[(pool["n_detections"] - med).abs().argsort()[:1]]])
+    missing = set(chosen) - set(out["fire_id"])
+    if missing:
+        raise SystemExit(f"MVP fires absent from {events_csv.name}: {sorted(missing)}")
     return out.sort_values("start").reset_index(drop=True)
 
 
@@ -168,13 +418,12 @@ def main() -> None:
     p.add_argument("--fire-id", help="single fire to fetch")
     p.add_argument("--all-mvp", action="store_true", help="fetch the 5 MVP events")
     p.add_argument("--list-fires", action="store_true")
-    p.add_argument("--lead-hours", type=int, default=12)
-    p.add_argument("--max-hours", type=int, default=24)
+    p.add_argument("--dry-run", action="store_true", help="report hours needed, fetch nothing")
+    p.add_argument("--limit", type=int, help="stop after N hours per fire (smoke test)")
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()
 
     cfg = load_config(args.config)
-    out_root = ROOT / cfg["paths"]["raw_hrrr"]
     fires = pick_mvp_fires(ROOT / args.events)
 
     if args.list_fires:
@@ -192,21 +441,25 @@ def main() -> None:
     results = []
     for _, f in fires.iterrows():
         print(f"\n{f['fire_id']}  start {f['start']}  ({f['lat']:.2f}, {f['lon']:.2f})")
-        results.append(
-            download_event(
-                f["fire_id"], f["start"].to_pydatetime(), out_root,
-                args.lead_hours, args.max_hours, args.overwrite,
-            )
-        )
+        results.append(download_event(f["fire_id"], cfg, args.overwrite, args.dry_run, args.limit))
 
     print("\n=== summary ===")
     for r in results:
         if "error" in r:
             print(f"  {r['fire_id']}: {r['error']}")
+        elif args.dry_run:
+            print(f"  {r['fire_id']}: {r['hours_requested']:>5} hours  {r['span']}")
         else:
             miss = f", {len(r['missing'])} MISSING" if r["missing"] else ""
-            print(f"  {r['fire_id']}: {r['hours_ok']}/{r['hours_requested']} hours, {r['mb']} MB{miss}")
-    print(f"  total {sum(r.get('mb', 0) for r in results):.1f} MB")
+            rep = f", +{len(r['repaired'])} repair" if r.get("repaired") else ""
+            print(f"  {r['fire_id']}: {r['hours_ok']}/{r['hours_requested']} hours, "
+                  f"{r['mb']} MB fetched -> {r.get('stored_mb', 0)} MB stored{rep}{miss}")
+    if args.dry_run:
+        total = sum(r.get("hours_requested", 0) for r in results)
+        print(f"  total {total:,} hours, ~{total * 5.1 / 1000:.1f} GB to fetch")
+    else:
+        print(f"  total {sum(r.get('mb', 0) for r in results):.1f} MB fetched, "
+              f"{sum(r.get('stored_mb', 0) for r in results):.1f} MB stored")
 
 
 if __name__ == "__main__":

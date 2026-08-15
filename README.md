@@ -9,15 +9,24 @@ for the full design; this file covers setup and current status.
 pip install -r requirements.txt
 ```
 
-Already present in this environment: `torch 2.7.0+cu118` (CUDA available, RTX 4070 Laptop),
-`numpy`, `pandas`, `matplotlib`. Installed for Phase 1: `rasterio`, `pyproj`, `shapely`,
-`scipy`, `pyarrow`, `pyyaml`, `requests`, `tqdm`.
+Everything installs from pip on Windows — no conda needed, and no `herbie-data` dependency since
+`pipeline/hrrr.py` does its own index subsetting. `cfgrib`/`eccodes` ship working binary wheels
+(verified on both Python 3.11 and 3.13). `cartopy` (Phase 7 figures) is still not installed.
 
-Installed for Phase 1.2: `cfgrib 0.9.15.1`, `eccodes 2.47.0` (binary wheel), `xarray`, `zarr`,
-`boto3`. The pip route worked cleanly on Windows + Python 3.13 — no conda needed, and no
-`herbie-data` dependency since `pipeline/hrrr.py` does its own index subsetting.
+**Pin the venv to 3.11 or 3.13, not the newest Python.** The geospatial and GRIB wheels lag new
+releases by months, and this stack is entirely wheel-dependent.
 
-Not yet installed: `h5py` (if HDF5 is preferred over zarr in Phase 3), `cartopy` (Phase 7 figures).
+### Current machine (rebuilt 2026-08-14)
+
+| | previous laptop | current |
+|---|---|---|
+| GPU | RTX 4070 Laptop, 8 GB | **RTX 3090, 24 GB** |
+| free disk | 83 GB | 209 GB |
+| Python / torch | 3.13 / 2.7.0+cu118 | 3.11 / 2.11.0+cu128 |
+
+The VRAM tables further down were measured on the 8 GB card and still describe the model's memory
+appetite correctly, but the *conclusions* drawn from a 6.9 GB ceiling no longer bind here — see
+"Known issues to revisit".
 
 ## FIRMS API key
 
@@ -63,7 +72,7 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] FIRMS download script (chunked, resumable, retries)
 - [x] Fire event segmentation (spatiotemporal single-link clustering)
 - [x] Full 2015-2023 FIRMS pull — 658 chunks, 67 MB, 741,236 detections after filtering
-- [x] Segmentation over the full archive — **692 usable fire events**
+- [x] Segmentation over the full archive — **622 usable fire events** at 24 h windows
 - [x] Archive gap audit (`download.py audit`)
 - [x] Phase 1.2 — HRRR for the 5 MVP fires (184/185 hours, 1.1 GB)
 - [x] Phase 1.3 — LANDFIRE fuels via LFPS (5 fires, 70 MB)
@@ -72,7 +81,8 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] Phase 2 — label rasterisation (`pipeline/labels.py`), 24 h windows, acreage-calibrated
 - [x] Phase 3a — static feature stack (terrain + fuel), co-registration verified
 - [x] Phase 3b — tiled sample index, 661 samples over the MVP fires
-- [ ] Phase 3c — weather channels + Fosberg fuel moisture (**blocked on HRRR re-pull**)
+- [x] HRRR re-pull for the MVP fires — 499/501 hours (+4 gap-repair), 2.9 GB fetched, **23.8 MB stored**
+- [ ] Phase 3c — weather channels + Fosberg fuel moisture (HRRR is in place; features not written)
 - [ ] Phase 4 — `WildfireDataset` with on-the-fly tile cropping
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
@@ -80,12 +90,18 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 
 | split | years | fires | detections |
 |---|---|---|---|
-| train | 2015-2019 | 363 | 217,813 |
-| val | 2020-2021 | 187 | 388,108 |
-| test | 2022-2023 | 142 | 31,167 |
+| train | 2015-2019 | 320 | 213,754 |
+| val | 2020-2021 | 166 | 386,690 |
+| test | 2022-2023 | 136 | 30,645 |
 
-Per-year event counts track the real severity record: 2020 (117) and 2017 (111) high, 2019 (44)
-low. **But note the detection totals**: the val years hold 388k detections against 31k in test.
+**`keep` depends on `labels.window_hours`,** because `min_timesteps: 3` counts windows. The table
+above is at the chosen 24 h. At the original 6 h spec it was 692 fires (363/187/142, 637,088
+detections) — that earlier figure is what the first draft of this file recorded, and the 70-fire
+drop is the Phase 2 window switch, not data loss. Verified by re-running segmentation at both
+settings over the identical archive.
+
+Per-year event counts track the real severity record: 2020 (104) and 2017 (95) high, 2019 (39)
+low. **But note the detection totals**: the val years hold 387k detections against 31k in test.
 The CLAUDE.md chronological split puts the two most extreme seasons in California history
 (2020, 2021) in validation and two mild ones (2022, 2023) in test. Model selection will be tuned
 on megafire behaviour and then scored on quiet fires, and headline test CSI will not say much
@@ -389,21 +405,78 @@ Two bugs worth recording, both mine:
   by construction whenever a timestep has several tiles — it flagged 85% of samples. It now tests
   whether target growth touches the tile edge, giving 57.6%.
 
-### Weather is blocked until the HRRR re-pull
+### Weather — HRRR re-pull done
 
-24 h windows with `t_steps: 3` need history from **T-48h**, and the MVP pull only covers
-T-12h to T+24h:
+```bash
+python -m pipeline.hrrr --all-mvp --dry-run   # hours and GB, fetch nothing
+python -m pipeline.hrrr --all-mvp             # fetch, window, store, delete GRIBs
+```
 
-| fire | hours needed | present | |
+`download_event` used to be pinned to CLAUDE.md's T-12h..T+24h, which served under 5% of what
+24 h windows with `t_steps: 3` require. It now derives its hours from the fire's own label zarr,
+so weather can never span a different period than the targets.
+
+**The needed set is much smaller than an hourly count suggests: 501 hours, not 3,917.** For each
+usable window T the model sees `t_steps` windows ending at T, each needing wind at its own
+T, T-6h, T-12h — so the union is
+
+    {w - k*window_hours - lag : w in windows, k < t_steps, lag in (0, 6, 12)}
+
+Consecutive 24 h windows overlap heavily in that set, which is where the 7.8x comes from. It is
+also ~25% under a uniform `hrrr_step_hours: 6` grid, because the 18h-offset hour is never read by
+any feature.
+
+| fire | hours needed | present | fetched | stored |
+|---|---|---|---|---|
+| 2017_2405 | 57 | 55 | 254.6 MB | 1.7 MB |
+| Camp | 48 | 48 | 175.8 MB | 2.1 MB |
+| Creek | 195 | 195 | 946.5 MB | 10.6 MB |
+| Caldor | 159 | 159 | 1,164.3 MB | 7.6 MB |
+| Mosquito | 42 | 42 | 307.1 MB | 1.7 MB |
+| **total** | **501** | **499 (99.6%)** | **2.8 GB** | **23.7 MB** |
+
+Windowing to each fire's footprint plus a 60 km margin is a **120x** reduction, and the GRIBs are
+deleted as they are consumed, so peak scratch is one file. The 4.52 GB HRRR line in the storage
+budget below is now a large overestimate.
+
+Stored per fire in `data/processed/hrrr/{fire_id}.zarr`: `data` (hours, 4, ny, nx) float32 with
+channels `u10, v10, t2m, r2`, a `filled` flag per hour making the fetch resumable, and **`lon`/`lat`
+arrays per cell**. Those coordinates are not optional — HRRR is Lambert Conformal, so there is no
+correct way to resample onto the 100 m EPSG:5070 grid from the lon/lat bounding box alone.
+
+Verified against the Camp Fire ignition cell (nearest stored cell 315 m from 39.774N, -121.504W):
+
+| hour | wind | RH | T |
 |---|---|---|---|
-| 2017_2405 | 433 | 36 | 8.3% |
-| Camp | 361 | 37 | 10.2% |
-| Creek | 1,537 | 37 | 2.4% |
-| Caldor | 1,273 | 37 | 2.9% |
-| Mosquito | 313 | 37 | 11.8% |
+| 2018-11-08 12z | from 076&deg; at 21.6 mph | 23.2% | 10.1 &deg;C |
+| 2018-11-08 18z | from 063&deg; at 22.4 mph | 18.5% | 12.9 &deg;C |
+| 2018-11-09 00z | from 076&deg; at 15.9 mph | 8.3% | 17.7 &deg;C |
 
-**3,917 hours needed, 184 present (4.7%).** At 6-hourly sampling that is ~653 files, 3-4.5 GB
-for these five fires. Do this on the target machine rather than re-copying it.
+That is the Jarbo Gap offshore event: ENE downslope wind, RH collapsing through the day, and
+temperature *rising* into the evening. It brackets the 073&deg;/22 mph/RH 10%/18.3 &deg;C recorded from the
+earlier hourly pull, so the crop and the Lambert indexing are correct.
+
+### Archive holes repair themselves
+
+Two hours are absent from the bucket for 2017_2405: `20170806_00z` (the hole already documented
+above) and `20170819_18z`. Both are isolated rather than consecutive.
+
+On a 6-hourly stored set an isolated hole would have to be interpolated across **12 h**, which is
+far too long an assumption for 10 m wind. So a missing hour now automatically pulls its **plus and
+minus 1 h neighbours**, and the fetcher records them in `repair_hours`:
+
+| gap | bracket | span |
+|---|---|---|
+| 20170806_00z | 20170805_23z / 20170806_01z | 2 h |
+| 20170819_18z | 20170819_17z / 20170819_19z | 2 h |
+
+Four extra requests, ~20 MB, and Phase 3c interpolates across 2 h instead of 12. Repair is
+bounded by `repair_rounds` (default 2) so a genuine multi-hour outage walks outward once and then
+stops rather than expanding indefinitely — and a real outage should still drop its windows, per
+the rule in Phase 1.2.
+
+The store is therefore a **superset** of the needed set. `hrrr_coverage` counts membership rather
+than comparing lists, or repair hours would read as a coverage failure.
 
 ## Storage budget — do NOT materialise samples
 
@@ -544,10 +617,16 @@ train/test.
 
 ## Known issues to revisit
 
-- `batch_size: 16` in the config comes from CLAUDE.md, but measures at 9.62 GB against 6.9 GB
-  free — it spills to system RAM rather than training at speed. Use **8** at 256x256 (4.82 GB)
-  with gradient accumulation x2 to keep the effective batch at 16, and keep AMP on as the config
-  already specifies. See the measured table above.
+- `batch_size: 16` in the config comes from CLAUDE.md, but measured 9.62 GB against the old 8 GB
+  card's 6.9 GB free — it spilled to system RAM rather than training at speed. The config's
+  **8 + `grad_accum_steps: 2`** was that workaround. **On the 24 GB 3090 this no longer binds:**
+  bs16 at 256 fits natively, so the accumulation can be dropped (keep AMP either way).
+- **The 512 px context question is reopened by the 3090.** The analysis below concluded option A
+  partly because 512 px meant batch 2 on 8 GB. It also concluded that *above 16 GB* the right use
+  of headroom is feeding 512 px while supervising only the central 256 px — the U-Net overlap-tile
+  strategy, giving C's upwind context with A's coverage and positive fraction. That is now
+  affordable. It does not change the sample index (still A-tiled), only what the Dataset crops
+  around each tile, so it can be deferred to Phase 5 without reworking Phases 3-4.
 - The August Complex (2020) and similar complexes are genuinely multiple ignitions that merged.
   CLAUDE.md says to treat merges as a single union geometry, which the clustering does by
   construction — worth confirming that this is still what you want for the largest events.

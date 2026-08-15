@@ -165,20 +165,30 @@ def build_static(fire_id: str, cfg: dict, overwrite: bool = False) -> dict:
 
 
 def hrrr_coverage(fire_id: str, cfg: dict) -> dict:
-    """How much of the weather history the current HRRR pull can actually serve."""
-    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
-    times = [pd.Timestamp(t) for t in g.attrs["window_times"]]
-    window_h = int(g.attrs["window_hours"])
-    lead_h = window_h * (int(cfg["model"]["t_steps"]) - 1)
+    """How much of the weather history the stored HRRR windows can actually serve.
 
-    have = {p.stem for p in (ROOT / "data/raw/hrrr" / fire_id).glob("*.grib2")}
-    need_first = times[0] - pd.Timedelta(hours=lead_h)
-    need_last = times[-1]
-    hours = pd.date_range(need_first, need_last, freq="h")
-    present = sum(1 for t in hours if f"{t:%Y%m%d_%H}z" in have)
+    Counts the windowed zarr, not raw GRIBs — those are deleted after extraction
+    (`storage.keep_raw_hrrr_grib`), so globbing them reports 0% forever. `hours_needed`
+    is the exact feature-driven set from `hrrr.needed_hours`, which is what gets
+    fetched; the old hourly count over the whole span overstated it ~8x and also
+    started 12 h too late to cover the earliest wind lag.
+    """
+    from pipeline.hrrr import needed_hours
+
+    hours = needed_hours(fire_id, cfg)
+    store = ROOT / cfg["paths"]["hrrr_windows"] / f"{fire_id}.zarr"
+    present = extra = 0
+    if store.exists():
+        g = zarr.open_group(store, mode="r")
+        # The store is a superset of the needed set: gap repair adds +/-1 h bracketing
+        # hours. Count membership rather than comparing the lists, or repair would look
+        # like a coverage failure.
+        have = {s for s, f in zip(g.attrs.get("times", []), np.asarray(g["filled"])) if f}
+        present = sum(1 for t in hours if f"{t:%Y%m%d_%H}z" in have)
+        extra = len(have) - present
     return {
-        "fire_id": fire_id, "need_from": str(need_first), "need_to": str(need_last),
-        "hours_needed": len(hours), "hours_present": present,
+        "fire_id": fire_id, "need_from": str(hours[0]), "need_to": str(hours[-1]),
+        "hours_needed": len(hours), "hours_present": present, "repair_hours": extra,
         "pct": round(100 * present / max(len(hours), 1), 1),
     }
 

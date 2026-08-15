@@ -2,7 +2,8 @@
 
 paths:
   raw_firms: data/raw/firms
-  raw_hrrr: data/raw/hrrr
+  raw_hrrr: data/raw/hrrr          # scratch only — GRIBs are deleted after windowing
+  hrrr_windows: data/processed/hrrr
   raw_landfire: data/raw/landfire
   raw_dem: data/raw/dem
   samples: data/processed/samples
