@@ -19,6 +19,7 @@ multi-band GeoTIFF, bands in `Layer_List` order.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import io
 import json
 import os
@@ -152,42 +153,70 @@ def main() -> None:
     p.add_argument("--events", default="data/processed/fire_events.csv")
     p.add_argument("--fire-id")
     p.add_argument("--all-mvp", action="store_true")
+    p.add_argument("--all", action="store_true", help="every kept fire")
+    p.add_argument("--quiet", action="store_true", help="one line per fire, for long runs")
+    p.add_argument("--workers", type=int, default=6, help="concurrent LFPS jobs")
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()
 
     cfg = load_config(args.config)
     email = get_email()
-    fires = pick_mvp_fires(ROOT / args.events)
-    if args.fire_id:
-        fires = fires[fires["fire_id"] == args.fire_id]
-    elif not args.all_mvp:
-        raise SystemExit("pass --fire-id or --all-mvp")
+    if args.all:
+        ev = pd.read_csv(ROOT / args.events)
+        fires = ev[ev["keep"]].sort_values("fire_id")
+    else:
+        fires = pick_mvp_fires(ROOT / args.events)
+        if args.fire_id:
+            fires = fires[fires["fire_id"] == args.fire_id]
+        elif not args.all_mvp:
+            raise SystemExit("pass --fire-id, --all-mvp or --all")
 
     print(f"strategy={cfg['landfire']['version_strategy']} "
-          f"layers={cfg['landfire']['layers']}\n")
-    rows = []
-    for _, f in fires.iterrows():
-        print(f"{f['fire_id']} ({f['year']})")
-        try:
-            r = fetch_for_fire(f, cfg, email, args.overwrite)
-        except Exception as exc:
-            print(f"    FAILED: {type(exc).__name__}: {exc}")
-            continue
+          f"layers={cfg['landfire']['layers']}  {len(fires)} fires, "
+          f"{args.workers} workers\n")
+
+    def one(f: pd.Series) -> dict:
+        r = fetch_for_fire(f, cfg, email, args.overwrite)
         with rasterio.open(r["path"]) as ds:
             r["shape"] = f"{ds.width}x{ds.height}"
             r["mb"] = round(Path(r["path"]).stat().st_size / 1e6, 1)
-            stats = []
-            for b, name in enumerate(cfg["landfire"]["layers"], 1):
-                a = ds.read(b, masked=True)
-                stats.append(f"{name} {a.min()}-{a.max()}")
-        flag = "  [FUEL MAP POSTDATES FIRE]" if r["contaminated"] else ""
-        print(f"    {r['status']}  {r['version']}  {r['shape']}  {r['mb']} MB  "
-              f"| {'; '.join(stats)}{flag}")
-        rows.append(r)
+            r["stats"] = "; ".join(
+                f"{name} {ds.read(b, masked=True).min()}-{ds.read(b, masked=True).max()}"
+                for b, name in enumerate(cfg["landfire"]["layers"], 1))
+        return r
+
+    rows, failures = [], []
+    # LFPS is a job queue: almost all of the ~100 s per fire is spent waiting on the
+    # server, not transferring, so a handful of concurrent jobs turns a 17 h serial run
+    # into a few hours. Kept deliberately modest -- this is a public service.
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(one, f): f["fire_id"] for _, f in fires.iterrows()}
+        for i, fut in enumerate(as_completed(futures), 1):
+            fid = futures[fut]
+            try:
+                r = fut.result()
+            except Exception as exc:
+                # One fire failing must not lose the other 621; LFPS is a live service
+                # and transient job failures are expected over a run this long.
+                print(f"  {fid} FAILED: {type(exc).__name__}: {exc}", flush=True)
+                failures.append(fid)
+                continue
+            if args.quiet:
+                if i % 25 == 0 or i == len(fires):
+                    print(f"  {i:>4}/{len(fires)}  {len(failures)} failed", flush=True)
+            else:
+                flag = "  [FUEL MAP POSTDATES FIRE]" if r["contaminated"] else ""
+                print(f"  {fid}  {r['status']}  {r['version']}  {r['shape']}  "
+                      f"{r['mb']} MB | {r['stats']}{flag}", flush=True)
+            rows.append(r)
 
     out = ROOT / "data/processed/landfire_manifest.csv"
     pd.DataFrame(rows).to_csv(out, index=False)
-    print(f"\nwrote {out}")
+    print(f"\n{len(rows)} fires ok, {len(failures)} failed")
+    if failures:
+        print(f"failed: {failures[:20]}{' ...' if len(failures) > 20 else ''}")
+        print("rerun the same command to retry — completed fires are skipped")
+    print(f"wrote {out}")
 
 
 if __name__ == "__main__":

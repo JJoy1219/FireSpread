@@ -116,7 +116,12 @@ storage:
   hrrr_window_margin_cells: 20    # HRRR cells kept around each fire (3 km each)
   hrrr_step_hours: 6              # 6 h matches the T, T-6h, T-12h feature set (~34 GB transfer)
   # Per-fire 10 m DEM is ~160 GB across 692 fires; one statewide 100 m grid is ~0.5 GB.
+  # Validated against the 10 m clips on the MVP fires: elevation MAE 1.6-2.4 m, slope
+  # MAE 0.55-0.84 deg, aspect correlation 0.985-0.995.
   dem_mode: statewide_100m
+  # 3DEP stops at the US border, so fires straddling Mexico have partial elevation.
+  # Median-filling a mostly-empty DEM would fabricate terrain, so refuse below this.
+  min_dem_coverage: 0.98
 
 model:
   t_steps: 3                 # 3 x 24 h = 3 days of history

@@ -156,15 +156,33 @@ def build_static(fire_id: str, cfg: dict, overwrite: bool = False) -> dict:
             return {"fire_id": fire_id, "status": "cached"}
         shutil.rmtree(dest)
 
-    dem_p = ROOT / "data/raw/dem" / f"{fire_id}_dem.tif"
+    # Statewide 100 m is the default: per-fire 10 m clips are ~144 GB of transfer across
+    # the archive for data that is resampled to 100 m here anyway. The statewide grid is
+    # already EPSG:5070 at 100 m on snapped origins, so this warp is a crop, not an
+    # interpolation. `per_fire` keeps the original 10 m path for comparison.
+    if str(cfg["storage"].get("dem_mode", "statewide_100m")) == "statewide_100m":
+        dem_p = ROOT / cfg["paths"]["raw_dem"] / f"california_{int(res)}m_5070.tif"
+    else:
+        dem_p = ROOT / cfg["paths"]["raw_dem"] / f"{fire_id}_dem.tif"
     lf_p = sorted(glob.glob(str(ROOT / "data/raw/landfire" / f"{fire_id}_*.tif")))
-    if not dem_p.exists() or not lf_p:
-        return {"fire_id": fire_id, "status": "missing raw layers"}
+    if not dem_p.exists():
+        return {"fire_id": fire_id, "status": f"missing DEM ({dem_p.name})"}
+    if not lf_p:
+        return {"fire_id": fire_id, "status": "missing LANDFIRE"}
     lf_p = Path(lf_p[0])
 
     # Elevation is continuous -> bilinear.
     dem = warp_to_grid(dem_p, 1, transform, (h, w), crs, Resampling.bilinear)
-    dem = np.where(np.isfinite(dem), dem, np.nanmedian(dem[np.isfinite(dem)]))
+    finite = np.isfinite(dem)
+    cover = float(finite.mean())
+    # 3DEP is US-only, so fires straddling the Mexican border have no elevation over the
+    # Mexican portion — one is 3.5% covered. Median-filling those holes would invent flat
+    # terrain across most of the fire and the model would learn from it silently, so
+    # refuse the fire instead. Small edge holes are still filled.
+    min_cover = float(cfg["storage"].get("min_dem_coverage", 0.98))
+    if cover < min_cover:
+        return {"fire_id": fire_id, "status": f"DEM covers only {100*cover:.1f}%"}
+    dem = np.where(finite, dem, np.nanmedian(dem[finite]))
     slope, asp_sin, asp_cos, tpi = terrain_derivatives(dem, res)
 
     # LANDFIRE is already EPSG:5070 at 30 m, so this is a pure downsample. FBFM40 is
@@ -458,7 +476,14 @@ def tile_origins(lo: int, hi: int, n: int, patch: int, stride: int) -> list[int]
 
 
 def build_index(fire_id: str, cfg: dict) -> pd.DataFrame:
-    """Enumerate (fire_id, timestep, tile) samples covering the active perimeter."""
+    """Enumerate (fire_id, timestep, tile) samples covering the active perimeter.
+
+    Fires without a static stack are skipped rather than indexed: `build_static` refuses
+    fires whose DEM coverage is too poor to be honest about, and an index entry for one
+    would fail at `__getitem__` instead of at build time.
+    """
+    if not (ROOT / "data/processed/features" / f"{fire_id}.zarr").exists():
+        return pd.DataFrame()
     sc, gc = cfg["sampling"], cfg["grid"]
     patch = int(gc["patch_size"])
     stride = int(sc["tile_stride_px"])
@@ -522,27 +547,43 @@ def main() -> None:
     p.add_argument("--events", default="data/processed/fire_events.csv")
     p.add_argument("--fire-id")
     p.add_argument("--all-mvp", action="store_true")
+    p.add_argument("--all", action="store_true", help="every kept fire")
+    p.add_argument("--quiet", action="store_true", help="progress only, for long runs")
     p.add_argument("--overwrite", action="store_true")
     a = p.parse_args()
 
     cfg = load_config(a.config)
-    fires = pick_mvp_fires(ROOT / a.events)
-    if a.fire_id:
-        fires = fires[fires["fire_id"] == a.fire_id]
-    elif not a.all_mvp:
-        raise SystemExit("pass --fire-id or --all-mvp")
-    ids = fires["fire_id"].tolist()
+    if a.all:
+        ev = pd.read_csv(ROOT / a.events)
+        ids = sorted(ev.loc[ev["keep"], "fire_id"])
+    else:
+        fires = pick_mvp_fires(ROOT / a.events)
+        if a.fire_id:
+            fires = fires[fires["fire_id"] == a.fire_id]
+        elif not a.all_mvp:
+            raise SystemExit("pass --fire-id, --all-mvp or --all")
+        ids = fires["fire_id"].tolist()
 
     if a.what == "static":
         (ROOT / "data/processed/features").mkdir(parents=True, exist_ok=True)
-        for fid in ids:
+        bad = []
+        for i, fid in enumerate(ids, 1):
             r = build_static(fid, cfg, a.overwrite)
-            if r["status"] == "built":
+            if r["status"] not in ("built", "cached"):
+                bad.append((fid, r["status"]))
+            if a.quiet:
+                if i % 50 == 0 or i == len(ids):
+                    print(f"  {i:>4}/{len(ids)}  {len(bad)} skipped", flush=True)
+            elif r["status"] == "built":
                 print(f"{fid}  {r['shape']}  elev {r['elev_m']} m  slope p95 {r['slope_deg_p95']}deg  "
                       f"{r['fuel_classes']} fuel classes  CC<={r['cc_max']}%  CH<={r['ch_max_m']} m  "
                       f"{r['mb']} MB")
             else:
                 print(f"{fid}  {r['status']}")
+        if bad:
+            print(f"\n{len(bad)} fires skipped:")
+            for fid, why in bad[:20]:
+                print(f"  {fid}: {why}")
 
     elif a.what == "weather":
         # Weather is never materialised, so "building" it means proving every sample in

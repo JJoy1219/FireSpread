@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import warnings
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -389,6 +390,116 @@ def download_event(
     }
 
 
+def download_all(fire_ids: list[str], cfg: dict, overwrite: bool = False,
+                 dry_run: bool = False, repair_rounds: int = 2) -> dict:
+    """Fetch every fire's hours, downloading each **calendar hour only once**.
+
+    `download_event` is per fire, so fires burning in the same week re-fetch identical
+    GRIBs. Across the full archive that redundancy is roughly 4x. Here the needed sets
+    are unioned first, each unique hour is fetched once, and the message is windowed
+    into every fire that wants it before the GRIB is deleted.
+
+    Ordering matters for scratch: hours are processed in time order, so a GRIB is opened
+    once, fanned out, and dropped — peak scratch stays one file regardless of fire count.
+    """
+    per_fire: dict[str, list[str]] = {}
+    by_hour: dict[str, list[str]] = defaultdict(list)
+    skipped = []
+    for fid in fire_ids:
+        try:
+            hours = needed_hours(fid, cfg)
+        except (KeyError, FileNotFoundError):
+            skipped.append(fid)
+            continue
+        if len(hours) == 0 or hours[0].to_pydatetime().replace(tzinfo=timezone.utc) < HRRR_EPOCH:
+            skipped.append(fid)
+            continue
+        stamps = [f"{t:%Y%m%d_%H}z" for t in hours]
+        per_fire[fid] = stamps
+        for s in stamps:
+            by_hour[s].append(fid)
+
+    fire_hours = sum(len(v) for v in per_fire.values())
+    unique = len(by_hour)
+    if dry_run:
+        return {"fires": len(per_fire), "skipped": len(skipped), "fire_hours": fire_hours,
+                "unique_hours": unique, "dedupe": round(fire_hours / max(unique, 1), 2),
+                "est_gb": round(unique * 5.7 / 1000, 1)}
+
+    root = ROOT / cfg["paths"]["hrrr_windows"]
+    root.mkdir(parents=True, exist_ok=True)
+    tmp_dir = ROOT / cfg["paths"]["raw_hrrr"]
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    keep_grib = bool(cfg["storage"].get("keep_raw_hrrr_grib", False))
+
+    groups, bounds, slices, pos = {}, {}, {}, {}
+    for fid, stamps in per_fire.items():
+        g = zarr.open_group(root / f"{fid}.zarr", mode="a")
+        b = fire_window_bounds(fid, float(cfg["storage"]["hrrr_window_margin_cells"]) * 3.0)
+        _sync_store(g, stamps, b, overwrite)
+        groups[fid], bounds[fid] = g, b
+        pos[fid] = {s: i for i, s in enumerate(stamps)}
+
+    missing_hours: list[str] = []
+    ok = bytes_total = 0
+    todo = sorted(by_hour)
+    for n, stamp in enumerate(todo, 1):
+        wanted = [f for f in by_hour[stamp] if not bool(groups[f]["filled"][pos[f][stamp]])]
+        if not wanted:
+            continue
+        dt = _parse_stamp(stamp).to_pydatetime()
+        grib = tmp_dir / f"{stamp}.grib2"
+        res = download_hour(dt, grib, overwrite=True)
+        if res is None:
+            missing_hours.append(stamp)
+            continue
+        bytes_total += res[1]
+
+        for fid in wanted:
+            if fid not in slices:
+                slices[fid] = window_slice(grib, bounds[fid])
+                if "lon" not in groups[fid]:
+                    lon, lat = window_lonlat(grib, *slices[fid])
+                    groups[fid].create_array("lon", shape=lon.shape, dtype="float32",
+                                             overwrite=True)[:] = lon
+                    groups[fid].create_array("lat", shape=lat.shape, dtype="float32",
+                                             overwrite=True)[:] = lat
+            arr = extract_window(grib, *slices[fid])
+            g = groups[fid]
+            if "data" not in g or g["data"].shape[0] != len(per_fire[fid]):
+                g.create_array("data", shape=(len(per_fire[fid]), *arr.shape), dtype="float32",
+                               chunks=(1, len(CHANNELS), *arr.shape[1:]), overwrite=True)
+            g["data"][pos[fid][stamp]] = arr
+            g["filled"][pos[fid][stamp]] = True
+        ok += 1
+
+        if not keep_grib:
+            grib.unlink(missing_ok=True)
+        if n % 200 == 0 or n == len(todo):
+            print(f"  {n:>6}/{len(todo)} hours  {bytes_total/1e9:6.2f} GB fetched", flush=True)
+
+    # Archive holes: pull the +/-1 h neighbours so gaps interpolate across 2 h, same rule
+    # as the per-fire path. Re-planned over the affected fires only.
+    repaired = 0
+    if missing_hours and repair_rounds > 0:
+        affected = sorted({f for s in missing_hours for f in by_hour[s]})
+        print(f"  {len(missing_hours)} hours absent from the archive, "
+              f"repairing {len(affected)} affected fires")
+        for fid in affected:
+            r = download_event(fid, cfg, overwrite=False, repair_rounds=repair_rounds)
+            repaired += len(r.get("repaired", []))
+
+    for fid, g in groups.items():
+        filled = np.asarray(g["filled"])
+        g.attrs["missing"] = [s for s, f in zip(per_fire[fid], filled) if not f]
+
+    stored = sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) / 1e9
+    return {"fires": len(per_fire), "skipped": len(skipped), "fire_hours": fire_hours,
+            "unique_hours": unique, "dedupe": round(fire_hours / max(unique, 1), 2),
+            "hours_ok": ok, "missing": len(missing_hours), "repaired": repaired,
+            "gb": round(bytes_total / 1e9, 2), "stored_gb": round(stored, 2)}
+
+
 def pick_mvp_fires(events_csv: Path, n: int = 5) -> pd.DataFrame:
     """Five events spanning years, regions, sizes and splits — deterministic."""
     ev = pd.read_csv(events_csv, parse_dates=["start", "end"])
@@ -417,6 +528,7 @@ def main() -> None:
     p.add_argument("--events", default="data/processed/fire_events.csv")
     p.add_argument("--fire-id", help="single fire to fetch")
     p.add_argument("--all-mvp", action="store_true", help="fetch the 5 MVP events")
+    p.add_argument("--all", action="store_true", help="every kept fire, deduped by hour")
     p.add_argument("--list-fires", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="report hours needed, fetch nothing")
     p.add_argument("--limit", type=int, help="stop after N hours per fire (smoke test)")
@@ -424,6 +536,23 @@ def main() -> None:
     args = p.parse_args()
 
     cfg = load_config(args.config)
+
+    if args.all:
+        ev = pd.read_csv(ROOT / args.events)
+        ids = sorted(ev.loc[ev["keep"], "fire_id"])
+        r = download_all(ids, cfg, args.overwrite, args.dry_run)
+        if args.dry_run:
+            print(f"\n{r['fires']} fires ({r['skipped']} skipped: pre-HRRR or no usable windows)")
+            print(f"{r['fire_hours']:,} fire-hours -> {r['unique_hours']:,} unique calendar "
+                  f"hours ({r['dedupe']}x dedupe)")
+            print(f"estimated transfer ~{r['est_gb']} GB")
+        else:
+            print(f"\n{r['hours_ok']:,}/{r['unique_hours']:,} unique hours over {r['fires']} "
+                  f"fires ({r['dedupe']}x dedupe)")
+            print(f"{r['missing']} absent from archive, {r['repaired']} repair hours added")
+            print(f"{r['gb']} GB fetched -> {r['stored_gb']} GB stored")
+        return
+
     fires = pick_mvp_fires(ROOT / args.events)
 
     if args.list_fires:
