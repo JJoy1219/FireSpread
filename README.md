@@ -87,7 +87,9 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] Phase 5 — ConvLSTM U-Net + baseline U-Net, single-batch overfit test passes
 - [x] Full dataset construction, California 2015-2023 — **7,070 samples over 450 fires**
 - [x] Split boundary moved to 2015-2020 / 2021 / 2022-2023 — train is now 63.7%, was 21.7%
-- [ ] Phase 6 — `train.py`: loop, CSI/IoU logging, checkpointing by validation CSI
+- [x] Phase 6 — `train.py`: AMP, grad clip, cosine warm restarts, best-by-CSI checkpointing
+- [ ] First full training run (~8 h) and the ConvLSTM-vs-U-Net ablation
+- [ ] Phase 7 — `evaluate.py`: persistence/circular baselines, test metrics by fire size
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
 ### Events and split sizes (full archive)
@@ -669,9 +671,21 @@ stable across splits and any later LANDFIRE re-clip. Found only because the mode
 | 512 px in / 256 supervised | 4 | 21.87 GB | — |
 | 512 px in / 256 supervised | 8 | OOM | — |
 
-`grad_accum_steps` is **dropped** — it existed only to reach an effective batch of 16 on 8 GB,
-and batch 16 now fits natively. Note 21.91 of 22.8 GB free is 96%: stable on an idle card, but
-anything else holding VRAM will OOM it, and batch 12 leaves 6.4 GB.
+`grad_accum_steps` is **dropped** — it existed only to reach an effective batch of 16 on 8 GB.
+
+**But batch 16 is the wrong choice, and only end-to-end measurement showed it.** The table above
+is the model in isolation. With DataLoader workers and pinned buffers also resident, 21.91 of
+22.8 GB is 96% occupancy and the allocator thrashes:
+
+| batch | workers | s/step | samples/s | min/epoch | peak |
+|---|---|---|---|---|---|
+| 16 | 4 | 1.89 | 8.5 | 11.1 | 21.9 GB |
+| **12** | **6** | **0.58** | **20.7** | **3.6** | 16.5 GB |
+| 8 | 4 | 0.43 | 18.7 | 4.0 | 11.0 GB |
+
+**Batch 12 is 2.4x faster than batch 16 despite being smaller**, and raising workers made 16
+*worse* (2.38 s at 8, 2.58 s at 12) — contention, not starvation. Fitting is not the same as
+being fast. 100 epochs goes from ~21 h to ~8 h.
 
 **The overlap-tile idea does not pay after all.** The earlier analysis guessed a 16 GB card would
 allow batch 6 at 512 px; measured on 24 GB it is batch 4, OOM at 8. That is 4x the per-sample cost

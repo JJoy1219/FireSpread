@@ -213,15 +213,32 @@ train:
   # Gradient accumulation was an 8 GB workaround for reaching an effective batch of 16;
   # batch 16 now fits natively, so it is dropped.
   #
-  # Caveat: 21.91 of 22.8 GB free is 96%. It is stable on an otherwise idle card, but
-  # anything else holding VRAM will OOM it -- fall back to batch 12, which leaves 6.4 GB.
-  batch_size: 16
+  # Caveat: 21.91 of 22.8 GB free is 96%, which is stable but leaves no headroom.
+  #
+  # **Then measured end-to-end throughput, which reverses the choice.** With DataLoader
+  # workers and pinned buffers also resident, batch 16 thrashes the allocator:
+  #   batch 16, 4 workers  1.89 s/step   8.5 samples/s  11.1 min/epoch  21.9 GB
+  #   batch 12, 6 workers  0.58 s/step  20.7 samples/s   3.6 min/epoch  16.5 GB  <- current
+  #   batch  8, 4 workers  0.43 s/step  18.7 samples/s   4.0 min/epoch  11.0 GB
+  # Batch 12 is 2.4x faster than batch 16 despite being smaller, and more workers made
+  # 16 worse still (2.38 s at 8, 2.58 s at 12) -- contention, not starvation. Fitting is
+  # not the same as being fast; 100 epochs goes from ~21 h to ~8 h.
+  batch_size: 12
+  num_workers: 6
   lr: 1.0e-4
   epochs: 100
   early_stopping_patience: 10
-  loss: weighted_bce
+  loss: weighted_bce          # weighted_bce | focal
+  # Aggregate class-imbalance ratio over the training split, computed from the index if
+  # left null. Aggregate (total unburned / total burned = 102.8) rather than the median
+  # sample: the median sample is far sparser than the mean (0.247% vs 0.964% positive),
+  # so weighting by it implies ~404 and pushes the model to over-predict badly.
+  pos_weight: null
+  focal_alpha: 0.25           # only used when loss: focal
+  focal_gamma: 2.0
   grad_clip: 1.0
   amp: true
+  lr_restart_epochs: 10       # T_0 for cosine annealing with warm restarts, T_mult=2
   device: cuda
 
 splits:
