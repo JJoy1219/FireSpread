@@ -549,6 +549,8 @@ def main() -> None:
     p.add_argument("--all-mvp", action="store_true")
     p.add_argument("--all", action="store_true", help="every kept fire")
     p.add_argument("--quiet", action="store_true", help="progress only, for long runs")
+    p.add_argument("--prune", action="store_true",
+                   help="weather: drop samples that cannot produce weather from the index")
     p.add_argument("--overwrite", action="store_true")
     a = p.parse_args()
 
@@ -588,17 +590,19 @@ def main() -> None:
     elif a.what == "weather":
         # Weather is never materialised, so "building" it means proving every sample in
         # the index can produce a finite, physical tensor on demand.
-        idx = pd.read_parquet(ROOT / "data/processed/sample_index.parquet")
-        rows = []
+        idx_path = ROOT / "data/processed/sample_index.parquet"
+        idx = pd.read_parquet(idx_path)
+        rows, keep_rows = [], []
         for fid in ids:
             sub = idx[idx["fire_id"] == fid]
             ok = dropped = 0
             stats = []
-            for _, s in sub.iterrows():
+            for i, s in sub.iterrows():
                 w = weather_tile(fid, int(s["t_index"]), cfg, int(s["row0"]), int(s["col0"]))
                 if w is None:
                     dropped += 1
                     continue
+                keep_rows.append(i)
                 if not np.isfinite(w).all():
                     raise SystemExit(f"{fid} t={s['t_index']} produced non-finite weather")
                 ok += 1
@@ -607,14 +611,39 @@ def main() -> None:
                 stats.append([float(np.hypot(w[:, 0], w[:, 3]).mean()),
                               float(w[:, 6].mean()), float(w[:, 7].mean()),
                               float(w[:, 8].mean())])
-            m = np.array(stats).mean(axis=0)
+            # A fire can lose every sample to weather gaps, leaving nothing to average.
+            m = np.array(stats).mean(axis=0) if stats else np.full(4, np.nan)
             rows.append({"fire_id": fid, "samples": len(sub), "ok": ok, "dropped": dropped,
                          "wind_ms": round(m[0], 1), "rh_pct": round(m[1], 1),
                          "t_c": round(m[2] - 273.15, 1), "fosberg_pct": round(m[3], 1)})
         df = pd.DataFrame(rows)
-        print(df.to_string(index=False))
+        if len(df) <= 10:
+            print(df.to_string(index=False))
+        else:
+            lost = df[df.dropped > 0].sort_values("dropped", ascending=False)
+            print(f"{len(df)} fires; {len(lost)} lost samples to weather gaps")
+            if len(lost):
+                print(lost.head(12).to_string(index=False))
+            print(f"\nmedians over fires with samples: wind {df.wind_ms.median():.1f} m/s, "
+                  f"RH {df.rh_pct.median():.1f}%, T {df.t_c.median():.1f} C, "
+                  f"Fosberg {df.fosberg_pct.median():.1f}%")
         print(f"\n{df.ok.sum():,}/{df.samples.sum():,} samples produce weather "
-              f"({df.dropped.sum()} dropped on unbridgeable gaps)")
+              f"({df.dropped.sum():,} dropped on unbridgeable gaps)")
+        out = ROOT / "data/processed/weather_check.csv"
+        df.to_csv(out, index=False)
+        print(f"wrote {out}")
+        # Safe to rewrite only if every fire in the index was actually checked — the
+        # index holds fewer fires than the archive, since fires with too few windows or
+        # no static stack never produced samples.
+        if a.prune and set(idx["fire_id"]).issubset(set(ids)):
+            # The index must be the authority on what is trainable. Samples that cannot
+            # produce weather would otherwise raise inside __getitem__ mid-epoch.
+            pruned = idx.loc[sorted(keep_rows)].reset_index(drop=True)
+            pruned.to_parquet(idx_path, index=False)
+            print(f"pruned index: {len(idx):,} -> {len(pruned):,} samples over "
+                  f"{pruned.fire_id.nunique()} fires")
+        elif a.prune:
+            print("--prune needs --all: refusing to rewrite the index from a subset")
 
     elif a.what == "hrrr-check":
         rows = [hrrr_coverage(f, cfg) for f in ids]

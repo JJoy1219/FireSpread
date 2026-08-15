@@ -33,6 +33,7 @@ import pandas as pd
 import zarr
 from botocore import UNSIGNED
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from pyproj import Transformer
 
 from pipeline.download import ROOT, load_config
@@ -45,7 +46,22 @@ FIELDS = {
     ("TMP", "2 m above ground"): "t2m",
     ("RH", "2 m above ground"): "rh2m",
 }
-# Names cfgrib gives these once decoded — note RH decodes as `r2`, not `rh2m`.
+# **HRRR before ~2017 carries no 2 m RH at all** — the 2 m fields are DPT, SPFH and TMP
+# only. 858 hours in 2015 and 316 in 2016 hit this, and they are disproportionately in
+# the 2015-2019 training split, so dropping them would starve exactly the split that is
+# already smallest. Dewpoint is always present, and RH follows from it and temperature
+# exactly, so we request DPT as a fallback and derive RH where the field is absent.
+DEWPOINT = ("DPT", "2 m above ground")
+# Hours whose RH was derived from dewpoint rather than read natively. Recorded per fire
+# in the store so the provenance is auditable: validated against an hour carrying both
+# fields, the derivation is within 0.95 percentage points on average at T >= 15 C (the
+# regime that drives spread) but degrades badly below 10 C, where fire is inactive.
+RH_DERIVED: set[str] = set()
+# 2 m RH appears with the HRRRv2 upgrade. Probed against the bucket: absent through
+# 2016-08-20, present from 2016-08-25, with 08-23/24 missing entirely. Any filled hour
+# before this carries RH derived from dewpoint.
+RH_EPOCH = datetime(2016, 8, 23, tzinfo=timezone.utc)
+# Names cfgrib gives these once decoded — note RH decodes as `r2`, dewpoint as `d2m`.
 CHANNELS = ["u10", "v10", "t2m", "r2"]
 # Feature spec (CLAUDE.md Phase 3): wind at T, T-6h, T-12h. Temperature and RH at T
 # only, but they ride along in the same messages so there is nothing to save by
@@ -65,9 +81,17 @@ def parse_idx(key: str) -> pd.DataFrame:
     """Fetch and parse the .idx sidecar into a frame with byte offsets."""
     body = _s3.get_object(Bucket=BUCKET, Key=key + ".idx")["Body"].read().decode()
     rows = []
-    for line in body.strip().split("\n"):
-        parts = line.split(":")
-        rows.append({"msg": int(parts[0]), "start": int(parts[1]), "var": parts[3], "level": parts[4]})
+    for line in body.strip().splitlines():
+        # Some .idx files on the bucket carry blank or truncated lines. A single one of
+        # them used to abort a whole archive run at the repair stage, so skip anything
+        # that does not parse rather than trusting the format.
+        parts = line.strip().split(":")
+        if len(parts) < 5 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        rows.append({"msg": int(parts[0]), "start": int(parts[1]),
+                     "var": parts[3], "level": parts[4]})
+    if not rows:
+        raise ValueError(f"no parseable entries in {key}.idx")
     df = pd.DataFrame(rows).sort_values("start").reset_index(drop=True)
     # A message ends where the next begins; the last one runs to EOF (-1 => open range).
     df["end"] = df["start"].shift(-1).fillna(0).astype("int64") - 1
@@ -93,23 +117,40 @@ def download_hour(dt: datetime, dest: Path, overwrite: bool = False) -> tuple[Pa
     key = _key(dt)
     try:
         idx = parse_idx(key)
-    except _s3.exceptions.NoSuchKey:
+    except (_s3.exceptions.NoSuchKey, ClientError, ValueError):
         print(f"  {dt:%Y-%m-%d %H}z  MISSING from archive")
         return None
 
+    def has(var: str, level: str) -> bool:
+        return bool(((idx["var"] == var) & (idx["level"] == level)).any())
+
+    # RH where the run has it, dewpoint where it does not (pre-2017).
+    wanted = [k for k in FIELDS if k != ("RH", "2 m above ground")]
+    native_rh = has("RH", "2 m above ground")
+    wanted.append(("RH", "2 m above ground") if native_rh else DEWPOINT)
+    if not native_rh:
+        RH_DERIVED.add(f"{dt:%Y%m%d_%H}z")
+
     mask = pd.Series(False, index=idx.index)
-    for (var, level) in FIELDS:
+    for (var, level) in wanted:
         mask |= (idx["var"] == var) & (idx["level"] == level)
     sel = idx[mask]
-    if len(sel) != len(FIELDS):
+    if len(sel) != len(wanted):
         found = set(zip(sel["var"], sel["level"]))
-        print(f"  {dt:%Y-%m-%d %H}z  expected {len(FIELDS)} messages, found {len(sel)}: {found}")
+        print(f"  {dt:%Y-%m-%d %H}z  expected {len(wanted)} messages, found {len(sel)}: {found}")
         return None
 
+    # The range fetches need the same guard as the index. The bucket does contain hours
+    # whose .idx is present but whose GRIB is not, and an unguarded NoSuchKey here killed
+    # a full-archive run 2,400 hours in. A missing object is a missing hour, not a crash.
     blobs = []
-    for start, end in _contiguous_runs(sel):
-        rng = f"bytes={start}-" if end < start else f"bytes={start}-{end}"
-        blobs.append(_s3.get_object(Bucket=BUCKET, Key=key, Range=rng)["Body"].read())
+    try:
+        for start, end in _contiguous_runs(sel):
+            rng = f"bytes={start}-" if end < start else f"bytes={start}-{end}"
+            blobs.append(_s3.get_object(Bucket=BUCKET, Key=key, Range=rng)["Body"].read())
+    except (_s3.exceptions.NoSuchKey, ClientError):
+        print(f"  {dt:%Y-%m-%d %H}z  index present but object missing")
+        return None
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(b"".join(blobs))
@@ -171,16 +212,31 @@ def _grib_datasets(path: Path) -> list:
         return cfgrib.open_datasets(str(path))
 
 
+_CONUS_LATLON: tuple[np.ndarray, np.ndarray] | None = None
+
+
+def conus_latlon(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """The HRRR grid's cell-centre lat/lon, decoded once and cached.
+
+    Identical in every file on the bucket, so decoding it per fire was 622 needless
+    GRIB parses. Longitudes are folded from the 0-360 convention to -180..180.
+    """
+    global _CONUS_LATLON
+    if _CONUS_LATLON is None:
+        ds = _grib_datasets(path)[0]
+        lat = np.asarray(ds["latitude"])
+        lon = ((np.asarray(ds["longitude"]) + 180.0) % 360.0) - 180.0
+        _CONUS_LATLON = (lat, lon)
+    return _CONUS_LATLON
+
+
 def window_slice(path: Path, bounds: tuple[float, float, float, float]) -> tuple[slice, slice]:
     """Index window into the HRRR grid covering `bounds`.
 
     HRRR is Lambert Conformal with 2-D lat/lon, so a lon/lat box is not a rectangle in
-    index space; we take the bounding box of every cell inside it. Longitudes come in
-    the 0-360 convention and are folded to -180..180 first.
+    index space; we take the bounding box of every cell inside it.
     """
-    ds = _grib_datasets(path)[0]
-    lat = np.asarray(ds["latitude"])
-    lon = ((np.asarray(ds["longitude"]) + 180.0) % 360.0) - 180.0
+    lat, lon = conus_latlon(path)
     lon_min, lat_min, lon_max, lat_max = bounds
     inside = (lat >= lat_min) & (lat <= lat_max) & (lon >= lon_min) & (lon <= lon_max)
     if not inside.any():
@@ -196,23 +252,87 @@ def window_lonlat(path: Path, sy: slice, sx: slice) -> tuple[np.ndarray, np.ndar
     per-cell coordinates there is no way to resample onto the 100 m EPSG:5070 fire
     grid, and interpolating the lon/lat bbox linearly is wrong by up to a cell.
     """
-    ds = _grib_datasets(path)[0]
-    lat = np.asarray(ds["latitude"])[sy, sx].astype("float32")
-    lon = ((np.asarray(ds["longitude"])[sy, sx] + 180.0) % 360.0) - 180.0
-    return lon.astype("float32"), lat
+    lat, lon = conus_latlon(path)
+    return lon[sy, sx].astype("float32"), lat[sy, sx].astype("float32")
 
 
-def extract_window(path: Path, sy: slice, sx: slice) -> np.ndarray:
-    """Crop one hour's GRIB to `(len(CHANNELS), ny, nx)` float32."""
+def rh_from_dewpoint(t_k: np.ndarray, td_k: np.ndarray) -> np.ndarray:
+    """Relative humidity (%) from temperature and dewpoint, both kelvin.
+
+    Magnus-Tetens saturation vapour pressure, the same relation the model output would
+    have used. Exact rather than an approximation: RH is by definition the ratio of
+    saturation vapour pressure at the dewpoint to that at the temperature.
+    """
+    a, b = 17.625, 243.04
+    t_c = t_k - 273.15
+    td_c = td_k - 273.15
+    rh = 100.0 * np.exp(a * td_c / (b + td_c)) / np.exp(a * t_c / (b + t_c))
+    return np.clip(rh, 0.0, 100.0)
+
+
+def read_full_field(path: Path) -> np.ndarray:
+    """Decode one hour to the full CONUS `(len(CHANNELS), 1059, 1799)` field.
+
+    Decoding is the expensive part — cfgrib parses the messages and writes an index
+    sidecar — and it costs far more than the download (0.43 s to fetch an hour against
+    seconds to decode it). With hours shared by ~4.4 fires, decoding per fire made the
+    full run CPU-bound at roughly 9 hours. Decode once here, slice per fire from memory:
+    the whole CONUS field is only ~30 MB.
+    """
     found = {}
     for ds in _grib_datasets(path):
         for name in ds.data_vars:
-            if name in CHANNELS:
-                found[name] = np.asarray(ds[name])[sy, sx]
+            if name in CHANNELS or name == "d2m":
+                found[name] = np.asarray(ds[name])
+
+    if "r2" not in found and "d2m" in found and "t2m" in found:
+        found["r2"] = rh_from_dewpoint(found["t2m"], found["d2m"])
+
     missing = [c for c in CHANNELS if c not in found]
     if missing:
         raise SystemExit(f"{path.name}: GRIB decoded without {missing}; got {sorted(found)}")
     return np.stack([found[c] for c in CHANNELS]).astype("float32")
+
+
+def fire_slice(grp, path: Path, bounds: tuple) -> tuple[slice, slice]:
+    """The fire's window into the HRRR grid, pinned in the store on first use.
+
+    Recomputing it per run is not stable: HRRR files from different years encode their
+    coordinate grids at slightly different float precision, so the "cells inside this
+    bbox" test can land a column differently depending on which hour happened to be
+    fetched first. That surfaced as a broadcast error mid-run — but had the shapes
+    coincided while being offset by a cell, it would instead have written misaligned
+    weather with no error at all. Pinning it makes the window a property of the fire.
+    """
+    a = grp.attrs.get("window_slice")
+    if a:
+        return slice(a[0], a[1]), slice(a[2], a[3])
+
+    if "lon" in grp:
+        # Store predates the pin: recover the window by locating its origin cell.
+        lat, lon = conus_latlon(path)
+        slat, slon = np.asarray(grp["lat"]), np.asarray(grp["lon"])
+        hit = np.isclose(lat, slat[0, 0]) & np.isclose(lon, slon[0, 0])
+        ys, xs = np.where(hit)
+        if len(ys) == 1:
+            sy = slice(int(ys[0]), int(ys[0]) + slat.shape[0])
+            sx = slice(int(xs[0]), int(xs[0]) + slat.shape[1])
+            grp.attrs["window_slice"] = [sy.start, sy.stop, sx.start, sx.stop]
+            return sy, sx
+
+    sy, sx = window_slice(path, bounds)
+    grp.attrs["window_slice"] = [sy.start, sy.stop, sx.start, sx.stop]
+    return sy, sx
+
+
+def extract_window(path: Path, sy: slice, sx: slice, field: np.ndarray | None = None):
+    """Crop one hour to `(len(CHANNELS), ny, nx)` float32.
+
+    `field` lets a caller that already decoded the hour reuse it.
+    """
+    if field is None:
+        field = read_full_field(path)
+    return field[:, sy, sx]
 
 
 def _parse_stamp(s: str) -> pd.Timestamp:
@@ -328,7 +448,7 @@ def download_event(
             nbytes += res[1]
 
             if sy is None:
-                sy, sx = window_slice(grib, bounds)
+                sy, sx = fire_slice(grp, grib, bounds)
                 if "lon" not in grp:
                     lon, lat = window_lonlat(grib, sy, sx)
                     grp.create_array("lon", shape=lon.shape, dtype="float32",
@@ -454,17 +574,18 @@ def download_all(fire_ids: list[str], cfg: dict, overwrite: bool = False,
             missing_hours.append(stamp)
             continue
         bytes_total += res[1]
+        field = read_full_field(grib)          # decode once, slice per fire below
 
         for fid in wanted:
             if fid not in slices:
-                slices[fid] = window_slice(grib, bounds[fid])
+                slices[fid] = fire_slice(groups[fid], grib, bounds[fid])
                 if "lon" not in groups[fid]:
                     lon, lat = window_lonlat(grib, *slices[fid])
                     groups[fid].create_array("lon", shape=lon.shape, dtype="float32",
                                              overwrite=True)[:] = lon
                     groups[fid].create_array("lat", shape=lat.shape, dtype="float32",
                                              overwrite=True)[:] = lat
-            arr = extract_window(grib, *slices[fid])
+            arr = extract_window(grib, *slices[fid], field=field)
             g = groups[fid]
             if "data" not in g or g["data"].shape[0] != len(per_fire[fid]):
                 g.create_array("data", shape=(len(per_fire[fid]), *arr.shape), dtype="float32",
@@ -492,6 +613,7 @@ def download_all(fire_ids: list[str], cfg: dict, overwrite: bool = False,
     for fid, g in groups.items():
         filled = np.asarray(g["filled"])
         g.attrs["missing"] = [s for s, f in zip(per_fire[fid], filled) if not f]
+        g.attrs["rh_derived"] = sorted(set(per_fire[fid]) & RH_DERIVED)
 
     stored = sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) / 1e9
     return {"fires": len(per_fire), "skipped": len(skipped), "fire_hours": fire_hours,

@@ -85,6 +85,8 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] Phase 3c — weather channels + Fosberg fuel moisture, 661/661 samples validated
 - [x] Phase 4 — `WildfireDataset` with on-the-fly tile cropping, splits, norm stats
 - [x] Phase 5 — ConvLSTM U-Net + baseline U-Net, single-batch overfit test passes
+- [x] Full dataset construction, California 2015-2023 — **7,070 samples over 450 fires**
+- [ ] **Split imbalance needs a decision before training** — val is 3.2x train (see below)
 - [ ] Phase 6 — `train.py`: loop, CSI/IoU logging, checkpointing by validation CSI
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
@@ -689,6 +691,105 @@ positive fraction 0.28% (`pos_weight` 353):
 
 False negatives reach zero first and false positives then fall — the trajectory a heavily
 weighted BCE should produce, recall before precision.
+
+## Full dataset — California 2015-2023
+
+```bash
+python -m pipeline.labels   --all
+python -m pipeline.landfire --all --quiet --workers 6
+python -m pipeline.dem      --statewide
+python -m pipeline.hrrr     --all                    # deduped by calendar hour
+python -m pipeline.features static  --all --quiet
+python -m pipeline.features index   --all
+python -m pipeline.features weather --all --prune    # validate, then drop what fails
+python -m pipeline.dataset  splits
+python -m pipeline.dataset  norm
+```
+
+**7,070 samples over 450 fires**, every one verified to produce a finite tensor.
+
+| stage | result | on disk |
+|---|---|---|
+| labels | 622 fires | 22 MB (1,614 MB raw) |
+| LANDFIRE | 622 fires, 0 failures | 3.0 GB |
+| statewide DEM | 12,162 x 13,245 @ 100 m | 226 MB |
+| static features | 610 fires (12 refused) | 1.0 GB |
+| HRRR windows | 25,979/27,249 fire-hours (95.3%) | **0.91 GB** |
+| sample index | 7,070 samples, 450 fires | 0.5 MB |
+
+The HRRR figure is the one worth noting: **5,850 unique calendar hours served 25,527 fire-hours
+(4.36x dedupe)**, ~15 GB fetched compressed to 0.91 GB stored, and peak scratch stayed one GRIB.
+
+### Attrition, honestly accounted
+
+622 kept fires become 450 trainable ones:
+
+| stage | fires | why |
+|---|---|---|
+| kept by `events` | 622 | |
+| static built | 610 | 12 refused: DEM coverage below `min_dem_coverage` |
+| produced samples | 479 | `min_timesteps: 3` is one short — see below |
+| survived weather | **450** | 716 samples lost to unbridgeable HRRR gaps |
+
+**`min_timesteps: 3` is one short of usable.** A sample needs `t_steps` windows of history
+*and* a target window, so 4 usable windows is the real floor. Of 105 fires with exactly 3,
+five yielded any sample. `sample_index.parquet`, not `keep`, is the authority on what is trainable.
+
+### The split is badly imbalanced — decide before training
+
+| split | samples | share | fires |
+|---|---|---|---|
+| train | **1,537** | 21.7% | 210 |
+| val | **4,926** | 69.7% | 127 |
+| test | 607 | 8.6% | 113 |
+
+**Validation holds 3.2x the training data.** The chronological split puts 2020-2021 — the two
+most extreme seasons on record — in validation, and option-A tiling multiplies each megafire into
+many tiles. Train is hit twice over: it also lost the most to weather gaps (2,253 -> 1,537, -32%),
+because 2015-2016 HRRR is the least complete.
+
+This was flagged earlier in detection counts; in samples it is worse. Training on 22% of the data
+while selecting models on 70% of it is not a defensible setup, and headline test CSI over 607
+samples will be noisy. Options, none yet taken:
+
+- keep chronological (comparable to Huot et al., no leakage) and accept a small train set;
+- shift the boundary, e.g. train 2015-2020, val 2021, test 2022-2023;
+- stratify by fire size within years so megafires are spread across splits — this breaks strict
+  chronology but keeps `fire_id` grouping and fixes the imbalance directly.
+
+### Two HRRR data-quality findings
+
+**Pre-2017 HRRR carries no 2 m RH at all.** Its 2 m fields are DPT, SPFH and TMP; RH arrives with
+the HRRRv2 upgrade, probed to **2016-08-23**. That would have silently cost 858 hours in 2015 and
+316 in 2016 — disproportionately the training split. RH is now derived from dewpoint via
+Magnus-Tetens, validated against an hour carrying both fields:
+
+| T range | mean error |
+|---|---|
+| 20-30 &deg;C | **0.65 pts** |
+| 10-20 &deg;C | 2.4 pts |
+| below 10 &deg;C | 11-23 pts |
+
+Accurate where fire spreads, poor where it does not. **3,230 fire-hours across 104 fires** use it,
+recorded per fire in `rh_derived` so the provenance is auditable rather than invisible.
+
+**153 hours are genuinely absent** from the bucket; 1,140 repair hours were fetched around them so
+those gaps interpolate across 2 h rather than 12.
+
+### Three crashes and a near-miss, all in the ingest path
+
+Worth recording because two were robustness and one was correctness:
+
+- `NoSuchKey` on the byte-range fetch. The `.idx` guard did not cover the object fetch, and the
+  bucket holds hours whose index exists but whose GRIB does not. Killed a run 2,400 hours in.
+- `int('')` in `parse_idx`. Some `.idx` files carry blank or truncated lines; one aborted the
+  repair stage. The parser now skips unparseable lines.
+- **The window slice was recomputed per run.** HRRR files from different years encode coordinates
+  at slightly different precision, so a fire's window could land a column differently depending on
+  which hour was fetched first. It surfaced as a broadcast error — but with coincidentally matching
+  shapes it would have written weather **offset by a cell against the stored lon/lat**, silently
+  corrupting every downstream regrid. The window is now pinned in the store on first use, with
+  recovery for stores written before the pin.
 
 ## Storage budget — do NOT materialise samples
 

@@ -202,11 +202,16 @@ def main() -> None:
     p.add_argument("--events", default="data/processed/fire_events.csv")
     p.add_argument("--fire-id")
     p.add_argument("--all-mvp", action="store_true")
+    p.add_argument("--statewide", action="store_true",
+                   help="build the statewide 100 m EPSG:5070 DEM (the default source)")
     p.add_argument("--margin-km", type=float, default=20.0)
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()
 
     cfg = load_config(args.config)
+    if args.statewide:
+        build_statewide(cfg, overwrite=args.overwrite)
+        return
     out_root = ROOT / cfg["paths"]["raw_dem"]
     fires = pick_mvp_fires(ROOT / args.events)
     if args.fire_id:

@@ -59,7 +59,14 @@ events:
   link_distance_km: 2.0      # ~5 VIIRS pixels at 375 m
   link_time_hours: 96        # a fire can go quiet for up to 4 days between detections
   min_detections: 25         # discard specks; roughly >= ~3 km^2 cumulative
-  min_timesteps: 3           # CLAUDE.md Phase 2: fires with < 3 timesteps are discarded
+  # CLAUDE.md Phase 2 says discard fires with < 3 timesteps, but that is one short of
+  # what the model can actually use: a sample needs `model.t_steps` windows of history
+  # AND a target window, so 4 usable windows is the true floor. Measured over the full
+  # archive: of 105 fires with exactly 3 usable windows, 5 yielded any sample at all.
+  # Left at 3 so `keep` stays comparable with the numbers already recorded; the fires
+  # simply contribute nothing, and `sample_index.parquet` is the authority on what is
+  # actually trainable (479 fires, not 622).
+  min_timesteps: 3
 
 labels:
   # S-NPP is sun-synchronous: all detections land in two ~4 h bands per day (08-11Z
