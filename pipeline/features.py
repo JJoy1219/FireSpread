@@ -35,7 +35,7 @@ import zarr
 from affine import Affine
 from pyproj import Transformer
 from rasterio.warp import Resampling, reproject
-from scipy.ndimage import uniform_filter
+from scipy.ndimage import map_coordinates, uniform_filter
 
 from pipeline.download import ROOT, load_config
 
@@ -246,15 +246,36 @@ def hrrr_index_grid(fire_id: str, cfg: dict, row0: int, col0: int,
     return (hy - y0) / dy, (hx - x0) / dx
 
 
-def bilinear(cube: np.ndarray, r: np.ndarray, c: np.ndarray) -> np.ndarray:
-    """Sample `(C, ny, nx)` at fractional indices, clamped at the window edge."""
-    ny, nx = cube.shape[-2:]
-    r = np.clip(r, 0, ny - 1.001)
-    c = np.clip(c, 0, nx - 1.001)
-    r0, c0 = np.floor(r).astype(int), np.floor(c).astype(int)
-    fr, fc = (r - r0)[None], (c - c0)[None]
-    return (cube[:, r0, c0] * (1 - fr) * (1 - fc) + cube[:, r0, c0 + 1] * (1 - fr) * fc
-            + cube[:, r0 + 1, c0] * fr * (1 - fc) + cube[:, r0 + 1, c0 + 1] * fr * fc)
+class Bilinear:
+    """Reusable bilinear gather onto a fixed fractional index grid.
+
+    The corner indices and weights depend only on the tile, not the hour, so they are
+    built once and reused for all 9 lag fields of a sample — and cached across samples,
+    since 50% tile overlap and adjacent timesteps hit the same tiles repeatedly.
+    """
+
+    def __init__(self, r: np.ndarray, c: np.ndarray, ny: int, nx: int):
+        # `mode="nearest"` clamps at the window edge, which is why the fetcher pads each
+        # fire's window by hrrr_window_margin_cells -- a tile should never reach the edge.
+        self.coords = np.stack([np.clip(r, 0, ny - 1), np.clip(c, 0, nx - 1)]).astype("float32")
+
+    def __call__(self, cube: np.ndarray) -> np.ndarray:
+        return np.stack([map_coordinates(ch, self.coords, order=1, mode="nearest")
+                         for ch in cube]).astype("float32")
+
+
+_SAMPLER: dict[tuple, Bilinear] = {}
+_HOURS: dict[tuple, np.ndarray] = {}
+
+
+def tile_sampler(fire_id: str, cfg: dict, row0: int, col0: int, patch: int) -> Bilinear:
+    key = (fire_id, row0, col0, patch)
+    if key not in _SAMPLER:
+        g = zarr.open_group(ROOT / cfg["paths"]["hrrr_windows"] / f"{fire_id}.zarr", mode="r")
+        ny, nx = g["lon"].shape
+        r, c = hrrr_index_grid(fire_id, cfg, row0, col0, patch)
+        _SAMPLER[key] = Bilinear(r, c, ny, nx)
+    return _SAMPLER[key]
 
 
 def fosberg_10h(t_k: np.ndarray, rh: np.ndarray) -> np.ndarray:
@@ -280,13 +301,28 @@ def fosberg_10h(t_k: np.ndarray, rh: np.ndarray) -> np.ndarray:
     return np.clip(m * 1.28, 1.0, 40.0).astype("float32")
 
 
-def _hour_cube(fire_id: str, cfg: dict) -> tuple[np.ndarray, dict[str, int], np.ndarray]:
+def _hour_cube(fire_id: str, cfg: dict) -> tuple:
+    """The hour store, left **lazy**.
+
+    Materialising it cost a full decompression of every hour on every sample — 27 MB per
+    call for a fire the size of Creek. Chunks are one hour each, so indexing reads only
+    what is asked for, and `_HOURS` memoises the decompressed hours that recur across
+    overlapping tiles and adjacent timesteps.
+    """
     g = zarr.open_group(ROOT / cfg["paths"]["hrrr_windows"] / f"{fire_id}.zarr", mode="r")
-    filled = np.asarray(g["filled"])
-    return np.asarray(g["data"]), {s: i for i, s in enumerate(g.attrs["times"])}, filled
+    return g["data"], {s: i for i, s in enumerate(g.attrs["times"])}, np.asarray(g["filled"])
 
 
-def _hour_field(data, pos, filled, t: pd.Timestamp) -> np.ndarray | None:
+def _hour_at(fire_id: str, data, i: int) -> np.ndarray:
+    key = (fire_id, i)
+    if key not in _HOURS:
+        if len(_HOURS) > 512:
+            _HOURS.clear()
+        _HOURS[key] = np.asarray(data[i])
+    return _HOURS[key]
+
+
+def _hour_field(fire_id, data, pos, filled, t: pd.Timestamp) -> np.ndarray | None:
     """One hour's `(4, ny, nx)` field, interpolating an isolated gap from +/-1 h.
 
     The gap rule from Phase 1.2. The fetcher guarantees a missing hour has its +/-1 h
@@ -296,15 +332,15 @@ def _hour_field(data, pos, filled, t: pd.Timestamp) -> np.ndarray | None:
     """
     i = pos.get(f"{t:%Y%m%d_%H}z")
     if i is not None and filled[i]:
-        return data[i]
+        return _hour_at(fire_id, data, i)
     lo = hi = None
     for dh in range(1, 4):
         j = pos.get(f"{t - pd.Timedelta(hours=dh):%Y%m%d_%H}z")
         if lo is None and j is not None and filled[j]:
-            lo = (dh, data[j])
+            lo = (dh, _hour_at(fire_id, data, j))
         k = pos.get(f"{t + pd.Timedelta(hours=dh):%Y%m%d_%H}z")
         if hi is None and k is not None and filled[k]:
-            hi = (dh, data[k])
+            hi = (dh, _hour_at(fire_id, data, k))
     if lo is None or hi is None:
         return None
     w = lo[0] / (lo[0] + hi[0])
@@ -326,17 +362,17 @@ def weather_tile(fire_id: str, t_index: int, cfg: dict, row0: int, col0: int,
     t_steps = int(cfg["model"]["t_steps"])
 
     data, pos, filled = _hour_cube(fire_id, cfg)
-    r, c = hrrr_index_grid(fire_id, cfg, row0, col0, patch)
+    sample = tile_sampler(fire_id, cfg, row0, col0, patch)
 
     out = np.zeros((t_steps, len(WEATHER_CHANNELS), patch, patch), dtype="float32")
     for k in range(t_steps):
         base = times[t_index] - pd.Timedelta(hours=window_h * k)
         lags = []
         for lag in (0, 6, 12):
-            f = _hour_field(data, pos, filled, base - pd.Timedelta(hours=lag))
+            f = _hour_field(fire_id, data, pos, filled, base - pd.Timedelta(hours=lag))
             if f is None:
                 return None
-            lags.append(bilinear(f, r, c))       # (4, patch, patch): u, v, t2m, rh
+            lags.append(sample(f))               # (4, patch, patch): u, v, t2m, rh
         step = t_steps - 1 - k                   # oldest first along the sequence axis
         out[step, 0:3] = [l[0] for l in lags]    # u10 at lag 0, 6, 12
         out[step, 3:6] = [l[1] for l in lags]    # v10

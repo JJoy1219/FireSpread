@@ -1,0 +1,87 @@
+{
+  "burn_mask": {
+    "mean": 0.0,
+    "std": 1.0,
+    "note": "left unscaled"
+  },
+  "u10_lag0": {
+    "mean": 0.0,
+    "std": 2.9976015840010297,
+    "note": "signed direction: zero mean, group-shared std"
+  },
+  "u10_lag6": {
+    "mean": 0.0,
+    "std": 2.9976015840010297,
+    "note": "signed direction: zero mean, group-shared std"
+  },
+  "u10_lag12": {
+    "mean": 0.0,
+    "std": 2.9976015840010297,
+    "note": "signed direction: zero mean, group-shared std"
+  },
+  "v10_lag0": {
+    "mean": 0.0,
+    "std": 2.9976015840010297,
+    "note": "signed direction: zero mean, group-shared std"
+  },
+  "v10_lag6": {
+    "mean": 0.0,
+    "std": 2.9976015840010297,
+    "note": "signed direction: zero mean, group-shared std"
+  },
+  "v10_lag12": {
+    "mean": 0.0,
+    "std": 2.9976015840010297,
+    "note": "signed direction: zero mean, group-shared std"
+  },
+  "rh2m": {
+    "mean": 21.113479246365024,
+    "std": 11.071826583209036
+  },
+  "t2m": {
+    "mean": 290.54576211579234,
+    "std": 3.0322747180082823
+  },
+  "fosberg_10h": {
+    "mean": 5.830641450748122,
+    "std": 2.4580159175061254
+  },
+  "elevation_centred": {
+    "mean": 86.64204916272844,
+    "std": 361.9591650438078
+  },
+  "slope": {
+    "mean": 14.248581173688606,
+    "std": 8.7324689267418
+  },
+  "aspect_sin": {
+    "mean": 0.0,
+    "std": 0.7062827782674664,
+    "note": "signed direction: zero mean, group-shared std"
+  },
+  "aspect_cos": {
+    "mean": 0.0,
+    "std": 0.7062827782674664,
+    "note": "signed direction: zero mean, group-shared std"
+  },
+  "tpi": {
+    "mean": -0.014825301349628717,
+    "std": 23.627540180512362
+  },
+  "cc": {
+    "mean": 39.353592051033466,
+    "std": 23.4484727247835
+  },
+  "ch": {
+    "mean": 17.752562783009903,
+    "std": 9.890529853622466
+  },
+  "_meta": {
+    "n_samples": 35,
+    "split": "train",
+    "fires": [
+      "2017_2405",
+      "2018_4037"
+    ]
+  }
+}

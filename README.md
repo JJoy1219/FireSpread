@@ -83,7 +83,7 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] Phase 3b — tiled sample index, 661 samples over the MVP fires
 - [x] HRRR re-pull for the MVP fires — 499/501 hours (+4 gap-repair), 2.9 GB fetched, **23.8 MB stored**
 - [x] Phase 3c — weather channels + Fosberg fuel moisture, 661/661 samples validated
-- [ ] Phase 4 — `WildfireDataset` with on-the-fly tile cropping
+- [x] Phase 4 — `WildfireDataset` with on-the-fly tile cropping, splits, norm stats
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
 ### Events and split sizes (full archive)
@@ -568,6 +568,64 @@ Per *fire* rather than per tile so overlapping tiles stay consistent for the sam
 
 Caveat worth keeping: the 5-fire measurement overstates the identity risk relative to the full
 622-fire archive, where elevation bands overlap far more. Hence the ablation arms.
+
+## Phase 4 — dataset
+
+```bash
+python -m pipeline.dataset splits    # fire-level train/val/test lists
+python -m pipeline.dataset norm      # per-channel stats, TRAIN fires only
+python -m pipeline.dataset check     # shapes, splits, flip correctness, throughput
+```
+
+Batches as `(B, t_steps, C, 256, 256)` float32 with fuel as a separate int tensor for the
+embedding, plus a `(B, 256, 256)` target. Nothing materialised — each `__getitem__` crops the
+burn mask and static stack and regrids weather for that tile.
+
+### Two normalisation bugs worth remembering
+
+Both were caught by looking at the printed stats rather than by anything failing.
+
+**Flips did not commute with normalisation.** `__getitem__` normalises and then flips, and the
+flip negates the *normalised* value. For a channel with mean `mu`, negating gives
+`(mu - x)/sigma` where the true flipped value is `(-x - mu)/sigma` — off by `2*mu/sigma`. The
+augmentation was quietly teaching shifted wind physics.
+
+**Per-lag means invented a temporal signal.** `u10_lag0` came out at +1.15 and `u10_lag12` at
+-2.30. Those are one variable at three times, so normalising each by its own mean would make a
+genuinely constant wind field appear to change across lags — corrupting exactly the channels
+that exist to carry temporal change.
+
+Both are fixed by `DIRECTION_GROUPS`: signed direction components (`u10_*`, `v10_*`,
+`aspect_sin/cos`) get **zero mean and a std shared across the group**. Zero mean is not a
+convenience — it is the symmetry the flip augmentation asserts is true, so making it exact is
+what lets negation and normalisation commute. `check` asserts it as a regression test.
+
+### Flip augmentation
+
+`aspect_sin` is the east component of the downslope bearing and `aspect_cos` the north
+component, so they mirror exactly as `u` and `v` do:
+
+| flip | mirrors | negates |
+|---|---|---|
+| east-west | columns | `u10_*`, `aspect_sin` |
+| north-south | rows | `v10_*`, `aspect_cos` |
+
+`_flip` takes explicit `ew`/`ns` flags so this is testable — the first version of the test seeded
+the RNG, drew 0.549 and 0.715, fired neither flip, and passed vacuously.
+
+### Throughput
+
+136 ms/sample single-threaded (7.4/s), after two fixes worth 1.7x: the hour store was being
+fully decompressed on every sample (27 MB per call for Creek) and is now read lazily per chunk
+with an LRU cache, and the bilinear gather is `map_coordinates` with cached coordinates rather
+than recomputed fancy-index weights per lag. On 8 workers that is ~0.3 s per batch of 16, which
+is roughly balanced against the GPU step.
+
+### Splits
+
+320 / 166 / 136 fires, grouped by `fire_id` and asserted disjoint. **`norm_stats.json` is
+provisional**: the MVP index only covers 2 train fires and 35 samples, so the values will move
+once the full archive is built. Regenerate before any run whose metrics matter.
 
 ## Storage budget — do NOT materialise samples
 
