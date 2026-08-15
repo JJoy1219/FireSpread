@@ -84,6 +84,8 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] HRRR re-pull for the MVP fires — 499/501 hours (+4 gap-repair), 2.9 GB fetched, **23.8 MB stored**
 - [x] Phase 3c — weather channels + Fosberg fuel moisture, 661/661 samples validated
 - [x] Phase 4 — `WildfireDataset` with on-the-fly tile cropping, splits, norm stats
+- [x] Phase 5 — ConvLSTM U-Net + baseline U-Net, single-batch overfit test passes
+- [ ] Phase 6 — `train.py`: loop, CSI/IoU logging, checkpointing by validation CSI
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
 ### Events and split sizes (full archive)
@@ -626,6 +628,67 @@ is roughly balanced against the GPU step.
 320 / 166 / 136 fires, grouped by `fire_id` and asserted disjoint. **`norm_stats.json` is
 provisional**: the MVP index only covers 2 train fires and 35 samples, so the values will move
 once the full archive is built. Regenerate before any run whose metrics matter.
+
+## Phase 5 — model
+
+`ConvLSTMUNet` is 5.35 M params: a ConvLSTM per scale at [64, 128, 256] with max-pooling
+between, each layer's final hidden state doubling as that scale's skip connection, then a
+transposed-conv decoder and a 1x1 head. `UNet` is the 1.90 M baseline with the time axis folded
+into channels.
+
+**Both return logits, not probabilities.** CLAUDE.md specifies a sigmoid on the final layer, but
+`pos_weight` reaches ~9,400 at the median sample, and `sigmoid` then `BCELoss` takes the log of a
+saturated probability and loses the gradient in float16. `BCEWithLogitsLoss` fuses them via
+log-sum-exp and stays stable; `predict()` applies the sigmoid for inference and metrics. The
+architecture is unchanged — only where the exponential is evaluated.
+
+Layer norm on the hidden state is implemented as `GroupNorm(1, C)`, which normalises over
+(C, H, W) per sample. Identical to LayerNorm but without pinning the spatial size into the
+module, so the same encoder runs at 256 or 512 px unmodified.
+
+### The fuel index was per-fire — a silent bug
+
+`fuel_dense_index` derived its vocabulary from the codes each fire happened to contain. So
+**index 5 meant fuel code 101 (short grass) in Camp and code 99 (barren) in Creek**, with 15 of
+27 shared codes disagreeing. A single embedding table would have been learning contradictory
+semantics per fire, and nothing would have failed — it would simply have trained on noise.
+
+Now fixed to the published SB40 vocabulary (45 codes + nodata), identical for every fire and
+stable across splits and any later LANDFIRE re-clip. Found only because the model needed a
+`fuel_classes` argument and the per-fire counts (20/29/30/30/28) did not agree.
+
+### Measured VRAM — RTX 3090, real 17+8 channel input, AMP, sustained
+
+| config | batch | peak | step |
+|---|---|---|---|
+| 256 px | 12 | 16.45 GB | 663 ms |
+| **256 px** | **16** | **21.91 GB** | **828 ms** |
+| 256 px | 24 | spills to system RAM | — |
+| 512 px in / 256 supervised | 4 | 21.87 GB | — |
+| 512 px in / 256 supervised | 8 | OOM | — |
+
+`grad_accum_steps` is **dropped** — it existed only to reach an effective batch of 16 on 8 GB,
+and batch 16 now fits natively. Note 21.91 of 22.8 GB free is 96%: stable on an idle card, but
+anything else holding VRAM will OOM it, and batch 12 leaves 6.4 GB.
+
+**The overlap-tile idea does not pay after all.** The earlier analysis guessed a 16 GB card would
+allow batch 6 at 512 px; measured on 24 GB it is batch 4, OOM at 8. That is 4x the per-sample cost
+for 4x fewer samples per step, on top of the 1.69x more pixel work per epoch already documented.
+Left off via `model.supervise_centre: null`, with the code path in place should it ever be wanted.
+
+### Single-batch overfit
+
+The fastest end-to-end check that data, model and loss are connected. 4 real samples, 60 steps,
+positive fraction 0.28% (`pos_weight` 353):
+
+| step | loss | CSI | TP | FP | FN |
+|---|---|---|---|---|---|
+| 0 | 1.4257 | 0.023 | 312 | 12,942 | 428 |
+| 30 | 0.1498 | 0.271 | 716 | 1,903 | 24 |
+| 59 | 0.0488 | 0.342 | 740 | 1,426 | 0 |
+
+False negatives reach zero first and false positives then fall — the trajectory a heavily
+weighted BCE should produce, recall before precision.
 
 ## Storage budget — do NOT materialise samples
 

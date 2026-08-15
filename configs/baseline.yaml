@@ -168,11 +168,26 @@ model:
   #   fire_centred | raw | none
   elevation_mode: fire_centred
 
+  # Overlap-tile option: feed a wider input, supervise only the centre, so every
+  # predicted pixel sees full surrounding context instead of a padded edge. Measured on
+  # the 3090: 512 px input costs 21.87 GB at **batch 4**, and OOMs at 8. That is 4x the
+  # per-sample cost for 4x fewer samples per step, against the README's own finding that
+  # 512 px does 1.69x the pixel work per epoch. The extra VRAM does not make this pay --
+  # left off. Set to 256 (with a 512 px crop in the Dataset) to enable.
+  supervise_centre: null
+
 train:
-  # Measured on the 8 GB 4070: bs16 @256 peaks at 9.62 GB and spills to system RAM.
-  # bs8 peaks at 4.82 GB and fits. Accumulate x2 for an effective batch of 16.
-  batch_size: 8
-  grad_accum_steps: 2
+  # Measured on the RTX 3090 (24 GB, 22.8 GB free) with the real 17+8 channel input,
+  # AMP on, full forward/backward/step, sustained over 6 iterations:
+  #   batch 12 -> 16.45 GB, 663 ms/step
+  #   batch 16 -> 21.91 GB, 828 ms/step   <- current
+  #   batch 24 -> spills to system RAM
+  # Gradient accumulation was an 8 GB workaround for reaching an effective batch of 16;
+  # batch 16 now fits natively, so it is dropped.
+  #
+  # Caveat: 21.91 of 22.8 GB free is 96%. It is stable on an otherwise idle card, but
+  # anything else holding VRAM will OOM it -- fall back to batch 12, which leaves 6.4 GB.
+  batch_size: 16
   lr: 1.0e-4
   epochs: 100
   early_stopping_patience: 10

@@ -46,6 +46,20 @@ FUEL_GROUPS = {
     "shrub": (141, 149), "timber-understory": (161, 169),
     "timber-litter": (181, 189), "slash": (201, 209),
 }
+# The published SB40 vocabulary, fixed and shared by every fire. Index 0 is nodata.
+# Must not be derived from the codes a given fire happens to contain — see
+# `fuel_dense_index` for what that cost.
+SB40_CODES = (
+    [91, 92, 93, 98, 99]                       # non-burnable
+    + list(range(101, 110))                    # GR1-GR9
+    + list(range(121, 125))                    # GS1-GS4
+    + list(range(141, 150))                    # SH1-SH9
+    + list(range(161, 166))                    # TU1-TU5
+    + list(range(181, 190))                    # TL1-TL9
+    + list(range(201, 205))                    # SB1-SB4
+)
+SB40_INDEX = {c: i + 1 for i, c in enumerate(SB40_CODES)}
+FUEL_N_CLASSES = len(SB40_CODES) + 1
 CONT_CHANNELS = ["elevation", "slope", "aspect_sin", "aspect_cos", "tpi", "cc", "ch"]
 
 # HRRR CONUS Lambert Conformal. Verified rather than assumed: projecting the stored
@@ -112,12 +126,24 @@ def terrain_derivatives(dem: np.ndarray, res: float, tpi_radius_m: float = 300.0
 
 
 def fuel_dense_index(codes: np.ndarray) -> tuple[np.ndarray, dict]:
-    """Map sparse Scott-Burgan codes onto 0..N-1, with 0 reserved for nodata."""
-    present = sorted(int(c) for c in np.unique(codes) if c > 0)
-    mapping = {c: i + 1 for i, c in enumerate(present)}
+    """Map Scott-Burgan codes onto a **fixed global** index, 0 reserved for nodata.
+
+    Deriving the mapping from the codes present in each fire — which this did until it
+    was caught in Phase 5 — gives every fire its own vocabulary. Index 5 meant code 101
+    (short grass) in Camp and code 99 (barren) in Creek, with 15 of 27 shared codes
+    disagreeing, so a single embedding table would have been learning contradictory
+    semantics per fire. Nothing fails visibly; the model just trains on noise.
+
+    The vocabulary is the published SB40 set, not the observed one, so it is stable
+    across fires, across splits, and across any later re-clip of LANDFIRE.
+    """
+    mapping = dict(SB40_INDEX)
     out = np.zeros(codes.shape, dtype=np.int16)
     for c, i in mapping.items():
         out[codes == c] = i
+    unknown = sorted({int(c) for c in np.unique(codes) if c > 0 and int(c) not in mapping})
+    if unknown:
+        raise SystemExit(f"fuel codes outside the SB40 vocabulary: {unknown}")
     return out, mapping
 
 
@@ -165,7 +191,8 @@ def build_static(fire_id: str, cfg: dict, overwrite: bool = False) -> dict:
                       transform.d, transform.e, transform.f],
         "channels": CONT_CHANNELS,
         "fuel_code_to_index": {str(k): v for k, v in fuel_map.items()},
-        "fuel_n_classes": len(fuel_map) + 1,
+        "fuel_n_classes": FUEL_N_CLASSES,          # global, not per-fire
+        "fuel_classes_present": int((np.unique(fuel_idx) > 0).sum()),
     })
     mb = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file()) / 1e6
     return {
