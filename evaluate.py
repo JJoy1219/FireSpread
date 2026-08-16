@@ -108,6 +108,85 @@ def baseline_counts(cfg: dict, split: str) -> dict:
     return out
 
 
+def per_fire_csi(df: pd.DataFrame, ti: int) -> pd.Series:
+    """CSI per fire at threshold index `ti`."""
+    return df.groupby("fire_id").apply(
+        lambda g: scores(np.stack(g["tp"].values)[:, ti].sum(),
+                         np.stack(g["fp"].values)[:, ti].sum(),
+                         np.stack(g["fn"].values)[:, ti].sum())["csi"], include_groups=False)
+
+
+def size_matched(cfg: dict, model, device: str, workers: int, amp: bool, ti: int) -> None:
+    """How much of the val -> test drop is composition rather than generalisation?
+
+    Test is ~3x sparser than validation and skewed toward small fires, and skill scales
+    strongly with fire size. So a raw val/test gap conflates two different things. Two
+    ways of separating them, which should agree:
+
+    * **Within-bin**: compare per-fire CSI inside shared absolute size bins. Composition
+      cannot explain a gap that survives inside a bin.
+    * **Reweighting**: re-weight validation fires to match the test size distribution.
+      The difference between raw and reweighted validation *is* the composition effect.
+    """
+    out = {}
+    for split in ("val", "test"):
+        print(f"\nevaluating {split} for the size-matched comparison...")
+        rows, _ = predict_split(cfg, model, split, device, workers, amp)
+        out[split] = per_fire_csi(pd.DataFrame(rows), ti)
+
+    sizes = fire_sizes()
+    val, test = out["val"], out["test"]
+    both = pd.concat([
+        pd.DataFrame({"csi": val, "split": "val", "size": sizes.reindex(val.index)}),
+        pd.DataFrame({"csi": test, "split": "test", "size": sizes.reindex(test.index)}),
+    ])
+    # Absolute bins shared by both splits, from the pooled size distribution — quantiles
+    # per split would defeat the purpose by re-introducing composition.
+    edges = np.quantile(both["size"], [0, .25, .5, .75, 1.0])
+    both["bin"] = pd.cut(both["size"], np.unique(edges), include_lowest=True)
+
+    print(f"\n=== size-matched: per-fire CSI within shared size bins ===\n")
+    print(f"{'burned cells':<26}{'val n':>7}{'val CSI':>10}{'test n':>8}{'test CSI':>10}{'gap':>9}")
+    print("-" * 70)
+    rows = []
+    for b, g in both.groupby("bin", observed=True):
+        v, t = g[g.split == "val"], g[g.split == "test"]
+        if len(v) < 3 or len(t) < 3:
+            continue
+        vm, tm = v.csi.median(), t.csi.median()
+        rows.append((b, len(v), vm, len(t), tm))
+        lab = f"{int(b.left):,}-{int(b.right):,}"
+        print(f"{lab:<26}{len(v):>7}{vm:>10.4f}{len(t):>8}{tm:>10.4f}{tm-vm:>+9.4f}")
+
+    # Reweight validation to the test size distribution.
+    share = both[both.split == "test"].groupby("bin", observed=True).size()
+    share = share / share.sum()
+    vmed = both[both.split == "val"].groupby("bin", observed=True)["csi"].median()
+    common = share.index.intersection(vmed.index)
+    reweighted = float((vmed[common] * share[common]).sum() / share[common].sum())
+    raw_val = float(val.median())
+    raw_test = float(test.median())
+
+    print(f"\nper-fire median CSI:")
+    print(f"  validation, as observed                {raw_val:.4f}")
+    print(f"  validation, reweighted to test sizes   {reweighted:.4f}")
+    print(f"  test, as observed                      {raw_test:.4f}")
+    drop = raw_val - raw_test
+    comp = raw_val - reweighted
+    if abs(drop) > 1e-9:
+        print(f"\n  total drop            {drop:+.4f}")
+        print(f"  composition explains  {comp:+.4f}  ({100*comp/drop:.0f}%)")
+        print(f"  residual (generalisation gap) {raw_test-reweighted:+.4f}"
+              f"  ({100*(1-comp/drop):.0f}%)")
+    out_path = ROOT / "runs" / "size_matched.json"
+    out_path.write_text(json.dumps({
+        "val_median": raw_val, "test_median": raw_test, "val_reweighted": reweighted,
+        "bins": [{"lo": int(b.left), "hi": int(b.right), "n_val": nv, "val_csi": vm,
+                  "n_test": nt, "test_csi": tm} for b, nv, vm, nt, tm in rows],
+    }, indent=2))
+    print(f"\nwrote {out_path}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Evaluate a checkpoint against baselines.")
     p.add_argument("--config", default="configs/baseline.yaml")
@@ -115,6 +194,8 @@ def main() -> None:
     p.add_argument("--model", choices=["convlstm_unet", "unet"], default="convlstm_unet")
     p.add_argument("--checkpoint")
     p.add_argument("--workers", type=int, default=6)
+    p.add_argument("--size-matched", action="store_true",
+                   help="compare val and test within shared fire-size bins")
     a = p.parse_args()
 
     cfg = load_config(a.config)
@@ -132,12 +213,16 @@ def main() -> None:
     val_thr = float(st.get("threshold", 0.5))
     print(f"{ckpt_path}  epoch {st.get('epoch')}  val CSI {st.get('best_csi', float('nan')):.4f}")
     print(f"operating threshold {val_thr} (selected on validation)\n")
-    print(f"evaluating {a.split}...")
+    ti = THRESHOLDS.index(val_thr) if val_thr in THRESHOLDS else THRESHOLDS.index(0.9)
+    if a.size_matched:
+        size_matched(cfg, model, device, a.workers,
+                     bool(cfg["train"].get("amp", True)), ti)
+        return
 
+    print(f"evaluating {a.split}...")
     rows, ds = predict_split(cfg, model, a.split, device, a.workers,
                              bool(cfg["train"].get("amp", True)))
     df = pd.DataFrame(rows)
-    ti = THRESHOLDS.index(val_thr) if val_thr in THRESHOLDS else THRESHOLDS.index(0.9)
 
     tp = np.stack(df["tp"].values); fp = np.stack(df["fp"].values); fn = np.stack(df["fn"].values)
     pooled = [scores(tp[:, i].sum(), fp[:, i].sum(), fn[:, i].sum()) for i in range(len(THRESHOLDS))]

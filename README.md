@@ -941,14 +941,49 @@ weighted toward exactly the cases the model handles worst, and a single headline
 Small fires are genuinely harder — fewer active pixels, a larger share of the perimeter influenced
 by suppression, and less signal per tile.
 
-### Val 0.2641 -> test 0.1849
+### Val -> test: the drop is composition, not generalisation
 
-A 30% drop, from two causes that should not be conflated:
+```bash
+python evaluate.py --size-matched
+```
 
-- **Composition.** Test is ~3x sparser (median positive 0.078% vs 0.339%) and skewed small, and
-  the size table above shows how much that costs.
-- **Generalisation.** Whatever remains after composition. Separating the two properly needs the
-  model scored on a size-matched subset — worth doing before quoting a generalisation gap.
+The raw val 0.2641 -> test 0.1849 looks like a 30% generalisation gap. It is not. Test is ~3x
+sparser and skewed toward small fires, and skill scales 3.4x with fire size, so the two effects
+have to be separated before any claim about generalisation. Two independent ways of doing it,
+which agree.
+
+**Reweight validation to the test size distribution:**
+
+| | per-fire median CSI |
+|---|---|
+| validation, as observed | 0.1848 |
+| **validation, reweighted to test sizes** | **0.0993** |
+| test, as observed | **0.0990** |
+
+Composition accounts for 0.0855 of the 0.0858 drop. The residual generalisation gap is
+**-0.0003** — indistinguishable from zero.
+
+**Compare within shared absolute size bins** (quantiles per split would re-introduce the very
+composition effect being removed):
+
+| burned cells | val n | val CSI | test n | test CSI | gap |
+|---|---|---|---|---|---|
+| 274-474 | 11 | 0.0423 | 29 | 0.0556 | **+0.0133** |
+| 474-896 | 5 | 0.0808 | 35 | 0.0952 | **+0.0145** |
+| 896-5,221 | 9 | 0.0954 | 31 | 0.1060 | **+0.0106** |
+| 5,221-780,160 | 22 | 0.2339 | 18 | 0.2015 | -0.0324 |
+
+Test is *better* than validation in three of four bins. **The model transfers to 2022-2023 as
+well as it does to 2021** — which is the claim the chronological split exists to test, and it
+holds.
+
+Caveats: validation bins are thin (5-22 fires), this is one model and one seed, and the largest
+bin still hides a size gradient inside it — validation's top bin holds Dixie and Caldor, whose
+scale test has nothing to match. The negative gap there is the one worth re-checking.
+
+**Consequence for reporting.** Do not describe the val/test difference as a generalisation gap.
+The correct statement is that the test split is harder by construction, and that per-fire,
+size-stratified metrics are the only ones that compare across splits at all.
 
 ## Storage budget — do NOT materialise samples
 
