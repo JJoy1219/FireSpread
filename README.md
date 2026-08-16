@@ -90,7 +90,7 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] Phase 6 — `train.py`: AMP, grad clip, cosine warm restarts, best-by-CSI checkpointing
 - [x] First full training run — **validation CSI 0.2641**, 3.2x the best naive baseline
 - [ ] ConvLSTM-vs-U-Net ablation (baseline needs widening to ~5.3 M params first)
-- [ ] Phase 7 — `evaluate.py`: persistence/circular baselines, test metrics by fire size
+- [x] Phase 7 — `evaluate.py`: test **CSI 0.1849**, 1.82x the naive baseline, stratified by size
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
 ### Events and split sizes (full archive)
@@ -886,6 +886,69 @@ uninformative against this target.
 - **Validation is one season**, 47 fires dominated by Dixie and Caldor. The test split is smaller
   and ~3x sparser (median positive 0.078% vs 0.339%), so test CSI should be expected to land below
   this for reasons unrelated to generalisation.
+
+## Test-set evaluation
+
+```bash
+python evaluate.py --split test
+```
+
+The operating threshold comes from the checkpoint, where it was chosen on validation.
+Re-choosing it on test would be selecting a hyperparameter on the test set; the test-optimal
+value is reported as an oracle number, not the headline.
+
+| | CSI/IoU | FAR | POD |
+|---|---|---|---|
+| **ConvLSTM U-Net @ val threshold 0.95** | **0.1849** | 0.783 | 0.558 |
+| (oracle: best test threshold 0.98) | 0.1953 | 0.689 | 0.345 |
+| persistence (= current burn) | 0.0000 | 1.000 | 0.000 |
+| dilate 1 ring | 0.0872 | 0.866 | 0.201 |
+| **dilate 3 ring** (best naive on test) | **0.1019** | 0.886 | 0.484 |
+| dilate 5 ring | 0.0910 | 0.904 | 0.651 |
+
+Brier score 0.03179. **Model beats the best naive baseline 1.82x** — real, but narrower than the
+3.2x on validation.
+
+**The validation-selected threshold transfers.** The test oracle gains only 0.0104 CSI over it
+(0.1953 vs 0.1849), so the operating point is not overfit to validation and the honest protocol
+costs almost nothing.
+
+### Pooled CSI flatters; report per fire
+
+| aggregation | CSI |
+|---|---|
+| pooled over all tiles | 0.1849 |
+| **per fire, median** | **0.0990** |
+| per fire, mean | 0.1120 |
+
+Pooling weights each *pixel* equally, so a handful of large fires dominate. Per-fire aggregation
+weights each *fire* equally and is the honest summary — it is also what the 50% tile overlap
+requires, since adjacent tiles are not independent samples. Report both, and never quote the
+pooled figure alone.
+
+### Skill scales with fire size
+
+| quartile (burned cells) | fires | median CSI | mean CSI |
+|---|---|---|---|
+| Q1 smallest | 29 | 0.0556 | 0.0772 |
+| Q2 | 28 | 0.0971 | 0.1012 |
+| Q3 | 28 | 0.0919 | 0.1102 |
+| **Q4 largest** | 28 | **0.1887** | 0.1605 |
+
+**3.4x between the smallest and largest quartiles.** This is the stratification the split analysis
+predicted was necessary: 2022-2023 were mild seasons of mostly small fires, so the test split is
+weighted toward exactly the cases the model handles worst, and a single headline CSI hides it.
+Small fires are genuinely harder — fewer active pixels, a larger share of the perimeter influenced
+by suppression, and less signal per tile.
+
+### Val 0.2641 -> test 0.1849
+
+A 30% drop, from two causes that should not be conflated:
+
+- **Composition.** Test is ~3x sparser (median positive 0.078% vs 0.339%) and skewed small, and
+  the size table above shows how much that costs.
+- **Generalisation.** Whatever remains after composition. Separating the two properly needs the
+  model scored on a size-matched subset — worth doing before quoting a generalisation gap.
 
 ## Storage budget — do NOT materialise samples
 
