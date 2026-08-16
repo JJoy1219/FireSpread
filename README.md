@@ -89,7 +89,7 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] Split boundary moved to 2015-2020 / 2021 / 2022-2023 — train is now 63.7%, was 21.7%
 - [x] Phase 6 — `train.py`: AMP, grad clip, cosine warm restarts, best-by-CSI checkpointing
 - [x] First full training run — **validation CSI 0.2641**, 3.2x the best naive baseline
-- [ ] ConvLSTM-vs-U-Net ablation (baseline needs widening to ~5.3 M params first)
+- [x] ConvLSTM-vs-U-Net ablation — **the recurrence does not earn its cost** (see below)
 - [x] Phase 7 — `evaluate.py`: test **CSI 0.1849**, 1.82x the naive baseline, stratified by size
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
@@ -984,6 +984,58 @@ scale test has nothing to match. The negative gap there is the one worth re-chec
 **Consequence for reporting.** Do not describe the val/test difference as a generalisation gap.
 The correct statement is that the test split is harder by construction, and that per-fire,
 size-stratified metrics are the only ones that compare across splits at all.
+
+## Ablation: does the ConvLSTM earn its cost?
+
+```bash
+python train.py --model unet                                # 1.90 M, CLAUDE.md baseline
+python train.py --model unet --hidden-dims 112,224,448      # 5.76 M, capacity-matched
+```
+
+**No.** Three runs, identical data, loss, schedule and seed:
+
+| model | params | val CSI | test CSI | test Brier | test per-fire median |
+|---|---|---|---|---|---|
+| ConvLSTM U-Net | 5.35 M | **0.2641** | 0.1849 | 0.03179 | 0.0990 |
+| U-Net (CLAUDE.md baseline) | 1.90 M | 0.2626 | 0.1826 | 0.02468 | 0.0963 |
+| **U-Net, capacity-matched** | 5.76 M | 0.2639 | **0.2003** | **0.01870** | **0.1120** |
+
+On validation all three are within 0.0015 — a 0.6% spread. On **test the plain U-Net wins**: the
+capacity-matched one beats the ConvLSTM by 8.3% CSI (0.2003 vs 0.1849) with a Brier score 41%
+lower, and 1.97x the naive baseline against 1.82x. Even the 1.90 M baseline, at a third the
+parameters, is within 1.2% on test.
+
+The wide baseline was deliberately built at **1.08x** the ConvLSTM's parameters rather than just
+under, so a ConvLSTM win could not be waved away as capacity. It did not need the protection.
+
+### Why the recurrence adds nothing here
+
+Not a bug — three plausible and mutually reinforcing reasons, all specific to how this dataset is
+built:
+
+- **The cumulative burn mask already encodes the history.** Step T carries burn accumulated from
+  ignition, so "where the fire has been" is in the input as a static channel. The recurrence is
+  being asked to re-derive something it can already read.
+- **Short-timescale weather is already in the channels.** Each step carries wind at its own
+  T, T-6h, T-12h, so the dynamics that matter for spread are present *within* a step. The
+  sequence axis only adds 24 h-scale evolution on top.
+- **Three steps is a short sequence.** A ConvLSTM has little to model over three frames, while
+  paying four gate convolutions per layer for the privilege.
+
+Note also that the ConvLSTM's advantage on validation vanishes and reverses on test, which is the
+signature of the extra capacity being spent on overfitting rather than on temporal structure.
+
+### Consequence
+
+**The U-Net is the better model to ship**: equal or better accuracy, markedly better calibration,
+2.8x fewer parameters at the baseline width, and 12% faster per epoch. CLAUDE.md names the
+ConvLSTM U-Net as the target architecture; on this data, at this sequence length, that choice is
+not supported.
+
+Worth testing before treating it as settled: a longer sequence (`t_steps` 5-7) and dropping the
+cumulative-mask channel would give the recurrence something the feed-forward path cannot already
+see. If the ConvLSTM cannot win under those conditions either, the architecture should be retired
+for this task.
 
 ## Storage budget — do NOT materialise samples
 

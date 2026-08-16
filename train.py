@@ -293,11 +293,14 @@ def main() -> None:
     p.add_argument("--workers", type=int,
                    help="DataLoader workers (default: train.num_workers in the config)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--hidden-dims", help="override model.hidden_dims, e.g. 112,224,448")
     p.add_argument("--resume")
     p.add_argument("--smoke", action="store_true", help="2 tiny epochs, checks the loop")
     a = p.parse_args()
     a.name = a.name or a.model
     cfg = load_config(a.config)
+    if a.hidden_dims:
+        cfg["model"]["hidden_dims"] = [int(v) for v in a.hidden_dims.split(",")]
     if a.workers is None:
         a.workers = int(cfg["train"].get("num_workers", 6))
     train(cfg, a)

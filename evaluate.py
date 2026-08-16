@@ -194,11 +194,14 @@ def main() -> None:
     p.add_argument("--model", choices=["convlstm_unet", "unet"], default="convlstm_unet")
     p.add_argument("--checkpoint")
     p.add_argument("--workers", type=int, default=6)
+    p.add_argument("--hidden-dims", help="override model.hidden_dims to match a checkpoint")
     p.add_argument("--size-matched", action="store_true",
                    help="compare val and test within shared fire-size bins")
     a = p.parse_args()
 
     cfg = load_config(a.config)
+    if a.hidden_dims:
+        cfg["model"]["hidden_dims"] = [int(v) for v in a.hidden_dims.split(",")]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt_path = a.checkpoint or f"checkpoints/{a.model}/best.pt"
     st = torch.load(ROOT / ckpt_path, map_location=device, weights_only=False)
@@ -232,7 +235,8 @@ def main() -> None:
     print(f"\n=== {a.split}: {len(df):,} samples over {df.fire_id.nunique()} fires ===\n")
     print(f"{'':<34}{'CSI/IoU':>9}{'FAR':>8}{'POD':>8}")
     print("-" * 59)
-    print(f"{'ConvLSTM U-Net @ val threshold':<34}{head['csi']:>9.4f}{head['far']:>8.3f}{head['pod']:>8.3f}")
+    label = f"{a.model} @ val threshold"
+    print(f"{label:<34}{head['csi']:>9.4f}{head['far']:>8.3f}{head['pod']:>8.3f}")
     print(f"{'  (oracle: best test threshold '+str(THRESHOLDS[best_i])+')':<34}"
           f"{pooled[best_i]['csi']:>9.4f}{pooled[best_i]['far']:>8.3f}{pooled[best_i]['pod']:>8.3f}")
     print(f"{'  Brier score':<34}{df.brier.mean():>9.5f}")
