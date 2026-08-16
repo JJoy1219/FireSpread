@@ -35,7 +35,15 @@ from pipeline.features import FUEL_N_CLASSES
 # Probability thresholds swept on validation. With a positive rate under 1%, 0.5 is not
 # obviously the right operating point, so the sweep is reported and the best is recorded
 # alongside the checkpoint rather than assumed.
-THRESHOLDS = (0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7)
+#
+# The range must extend well above 0.5. `pos_weight` of ~103 deliberately pushes the model
+# to over-predict, so its probabilities are inflated and the CSI-optimal threshold sits
+# high. A first run capped at 0.7 selected 0.7 in *every* epoch — pinned at the boundary,
+# with FAR still 0.81 there, which says the optimum was outside the sweep. That is not
+# cosmetic: checkpoint selection and early stopping both rank epochs by this number, so a
+# model whose true optimum is 0.9 would be scored at 0.7 and could lose to a worse one.
+# `check_boundary` below warns if the best is ever the largest value here.
+THRESHOLDS = (0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98)
 
 
 @dataclass
@@ -242,6 +250,10 @@ def train(cfg: dict, args) -> None:
                                   limit=4 if args.smoke else None)
         best = max(mets, key=lambda m: m["csi"])
         at_half = next(m for m in mets if m["threshold"] == 0.5)
+        if best["threshold"] == max(THRESHOLDS):
+            # The optimum is outside the sweep, so CSI is understated and epoch ranking
+            # may be distorted. Widen THRESHOLDS rather than ignoring this.
+            print(f"  WARNING: best threshold {best['threshold']} is the top of the sweep")
         secs = time.perf_counter() - t0
         print(f"epoch {epoch}: train {running/max(seen,1):.4f}  val {val_loss:.4f}  "
               f"CSI {best['csi']:.4f} @thr {best['threshold']}  "

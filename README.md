@@ -88,7 +88,8 @@ count, timestep count, patch-fit flag) and `data/processed/detections_labeled.pa
 - [x] Full dataset construction, California 2015-2023 — **7,070 samples over 450 fires**
 - [x] Split boundary moved to 2015-2020 / 2021 / 2022-2023 — train is now 63.7%, was 21.7%
 - [x] Phase 6 — `train.py`: AMP, grad clip, cosine warm restarts, best-by-CSI checkpointing
-- [ ] First full training run (~8 h) and the ConvLSTM-vs-U-Net ablation
+- [x] First full training run — **validation CSI 0.2641**, 3.2x the best naive baseline
+- [ ] ConvLSTM-vs-U-Net ablation (baseline needs widening to ~5.3 M params first)
 - [ ] Phase 7 — `evaluate.py`: persistence/circular baselines, test metrics by fire size
 - [ ] Planned ablation: 12 h windows + night/day pass flag, scored against 24 h at a common horizon
 
@@ -814,6 +815,77 @@ Worth recording because two were robustness and one was correctness:
   shapes it would have written weather **offset by a cell against the stored lon/lat**, silently
   corrupting every downstream regrid. The window is now pinned in the store on first use, with
   recovery for stores written before the pin.
+
+## First training run
+
+```bash
+python train.py --model convlstm_unet
+```
+
+Early-stopped at epoch 26, best at **epoch 16**, ~2 h on the 3090 at 4.4 min/epoch.
+
+| | value |
+|---|---|
+| validation CSI / IoU | **0.2641** @ threshold 0.95 |
+| FAR | 0.635 |
+| POD | 0.489 |
+
+CSI ran 0.041 -> 0.264 over 16 epochs. The LR warm restart is visible at epoch 10 (train loss
+jumps 0.374 -> 0.457, val CSI dips then recovers), and train/val diverge from about epoch 8
+(train 0.26 against val 1.51 by the end) — early stopping caught the overfit.
+
+### The threshold sweep had to be widened, and it changed the ranking
+
+`pos_weight` of ~103 deliberately pushes over-prediction, so the model's probabilities are
+inflated and the CSI-optimal threshold is high. A first run capped the sweep at 0.7 and selected
+0.7 in *every* epoch — pinned at the boundary. Re-run with the sweep extended to 0.98:
+
+| epoch | capped at 0.7 | swept to 0.98 | understated |
+|---|---|---|---|
+| 1 | 0.1374 @0.7 | 0.2163 @0.9 | 57% |
+| 2 | 0.1796 @0.7 | 0.2390 @0.9 | 33% |
+| 3 | 0.1597 @0.7 | 0.2411 @0.95 | 51% |
+| 4 | 0.1456 @0.7 | 0.2506 @0.95 | 72% |
+
+The damage was not just an understated number: under the capped sweep epochs 3-4 looked like
+*regressions* (0.180 -> 0.160 -> 0.146) and counted toward early stopping, when correctly measured
+they were monotonic improvements (0.239 -> 0.241 -> 0.251). `train.py` now warns whenever the best
+threshold is the largest in the sweep.
+
+### Baselines — persistence is NOT strong here
+
+CLAUDE.md Phase 7 calls persistence "deceptively strong". That is true of a **cumulative** burn
+target, where most correct pixels were already burning. Ours is **new burn only**
+(`burn[t+1] & ~cumulative[t]`), so persistence predicts exactly the cells the target excludes.
+Measured over the full validation split:
+
+| baseline | CSI | FAR | POD |
+|---|---|---|---|
+| persistence (= current burn) | **0.0000** | 1.000 | 0.000 |
+| dilate 1 ring | 0.0591 | 0.894 | 0.117 |
+| dilate 3 ring | 0.0811 | 0.899 | 0.296 |
+| **dilate 5 ring** (best naive) | **0.0833** | 0.906 | 0.419 |
+| dilate 8 ring | 0.0802 | 0.914 | 0.542 |
+| all-positive | 0.0128 | 0.987 | 1.000 |
+| **ConvLSTM U-Net** | **0.2641** | **0.635** | 0.489 |
+
+**3.2x the best naive baseline**, and the manner of the win matters more than the ratio: at
+comparable detection rate (POD 0.489 vs 0.419) the model's false-alarm ratio is 0.635 against
+0.906. A dilation ring sprays predictions in every direction and is wrong ~90% of the time; the
+model is wrong 64% of the time. It has learned *where* fire goes, not just that it spreads.
+
+Replace persistence with the dilation ring as the naive baseline in Phase 7 — persistence is
+uninformative against this target.
+
+### Two caveats on the 0.2641
+
+- **Not comparable to published CSI on cumulative masks.** Huot et al. and similar predict the
+  fire mask at T+1 day, including all the already-burning cells, which are trivially correct.
+  Ours excludes them, so it measures a strictly harder quantity and will read lower than
+  literature numbers that are not measuring the same thing.
+- **Validation is one season**, 47 fires dominated by Dixie and Caldor. The test split is smaller
+  and ~3x sparser (median positive 0.078% vs 0.339%), so test CSI should be expected to land below
+  this for reasons unrelated to generalisation.
 
 ## Storage budget — do NOT materialise samples
 
