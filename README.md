@@ -1102,6 +1102,66 @@ Note the t_steps=5 test numbers (0.2049 / 0.2088) are **not** comparable to the 
 because requiring five windows of history drops the shorter fires. Comparisons are valid only
 within a configuration.
 
+## Prediction visualisation, and what it revealed
+
+```bash
+python -m pipeline.viz_predict cases       --split test      # best/worst confusion maps
+python -m pipeline.viz_predict fire        --fire-id 2022_3298
+python -m pipeline.viz_predict sensitivity --mode permute    # input occlusion
+python -m pipeline.viz_predict calib
+```
+
+`pipeline/viz_predict.py`. The confusion map (TP/FP/FN as one colour-coded field) is the
+workhorse — predicted-vs-truth as two panels invites eyeballing overlap, which humans do badly.
+Defaults to CPU when the GPU is busy, so figures can be made during a training run.
+
+### The model is a learned dilation
+
+The case figure shows predictions as near-symmetric **haloes around the current perimeter**, not
+wind-driven plumes. Occlusion testing confirms it. Each input group is permuted across the batch
+(shuffled, so the marginal distribution stays realistic and the link to the target is destroyed —
+a stronger test than zeroing, which the model can learn to recognise as an artificial constant):
+
+| group permuted | mean \|dP\| near fire | CSI | CSI lost |
+|---|---|---|---|
+| **burn mask** | **0.192** | 0.0168 | **+0.1310** |
+| canopy (CC, CH) | 0.048 | 0.1353 | +0.0125 |
+| terrain (slope/aspect/TPI/elev) | 0.052 | 0.1412 | +0.0066 |
+| **wind (u/v, all lags)** | 0.029 | 0.1427 | **+0.0051** |
+| moisture (RH, Fosberg) | 0.036 | 0.1429 | +0.0049 |
+| temperature | 0.032 | 0.1458 | +0.0020 |
+
+Baseline CSI 0.1478 on a 96-sample test subset.
+
+**The burn mask alone accounts for ~89% of the skill.** Every physical driver together contributes
+about 0.031 CSI, roughly 21% of baseline. **Wind — the single most important physical driver of
+fire spread — costs less when destroyed than canopy cover does.**
+
+Under the weaker zeroing test the physical channels scored *negative* CSI drops (the model did
+marginally better without them), i.e. indistinguishable from noise. Permutation is the test to
+trust, and it puts them slightly positive but still small.
+
+This reframes the whole result. **1.97x over the dilation-ring baseline is the model learning a
+better-shaped dilation, not learning fire physics.** It explains several earlier observations at
+once: why the ConvLSTM recurrence bought nothing (the burn mask already carries the geometry), why
+weather-side regularisation is unlikely to help, and why skill scales with fire size (bigger fires
+have more perimeter geometry to work with).
+
+It also means the HRRR pipeline — the largest single piece of ingest work in this project — is
+currently not earning its place in the input. That is a finding about the *model*, not the data:
+the weather is present, correct and validated against known meteorology; the model simply is not
+learning to use it. Plausible reasons, in the order worth testing:
+
+- **The burn mask is too easy.** Perimeter geometry alone predicts most next-day growth, so
+  gradient descent has no pressure to learn a weaker signal. Training on `burn_mask_mode:
+  incremental`, or dropping the mask channel entirely and predicting growth *direction* rather
+  than location, would force the issue.
+- **24 h is too coarse for wind.** Wind direction can reverse within a window (the Camp Fire trace
+  shows exactly that), so the daily-aggregate target may average out the very effect the wind
+  channels carry.
+- **Class weighting swamps it.** At `pos_weight` ~103 the loss is dominated by getting the bulk of
+  the perimeter roughly right; directional detail is a rounding error in the gradient.
+
 ## Storage budget — do NOT materialise samples
 
 Measured on this machine: **83 GB free of 475 GB.** That is the binding constraint on the whole

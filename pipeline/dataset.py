@@ -108,6 +108,9 @@ class WildfireDataset(Dataset):
         self.t_steps = int(cfg["model"]["t_steps"])
         self.channels = channel_names(cfg)
         self.burn_mode = str(cfg["model"].get("burn_mask_mode", "cumulative"))
+        aug = cfg.get("sampling", {}).get("augment", {}) or {}
+        self.noise_std = float(aug.get("noise_std", 0.0))
+        self.chan_drop = float(aug.get("channel_dropout", 0.0))
 
         idx = pd.read_parquet(ROOT / (index_path or cfg["paths"].get(
             "sample_index", "data/processed/sample_index.parquet")))
@@ -188,6 +191,7 @@ class WildfireDataset(Dataset):
 
         if self.augment:
             x, target, fuel = self._flip(x, target, fuel)
+            x = self._jitter(x)
 
         return {
             "input": torch.from_numpy(np.ascontiguousarray(x, dtype="float32")),
@@ -195,6 +199,32 @@ class WildfireDataset(Dataset):
             "target": torch.from_numpy(np.ascontiguousarray(target, dtype="float32")),
             "meta": {"fire_id": fid, "t_index": t, "row0": row0, "col0": col0},
         }
+
+    def _jitter(self, x: np.ndarray) -> np.ndarray:
+        """Gaussian noise and channel dropout on the CONTINUOUS channels only.
+
+        The burn mask is excluded from both. CLAUDE.md forbids intensity shifts on it, and
+        the reason is substantive rather than stylistic: it is the one channel the model
+        conditions on to know where the fire currently is, and it shares its 0/1 scale with
+        the prediction target. Perturbing it changes the question rather than the view of it.
+
+        Noise is in normalised units, so a std of 0.05 is 5% of a channel's training spread
+        regardless of whether the channel is metres, m/s or percent.
+        """
+        if self.noise_std <= 0 and self.chan_drop <= 0:
+            return x
+        keep = np.array([c not in NO_NORM for c in self.channels])
+        if self.noise_std > 0:
+            noise = np.random.normal(0, self.noise_std, x.shape).astype("float32")
+            noise[:, ~keep] = 0.0
+            x = x + noise
+        if self.chan_drop > 0:
+            # Drop whole channels for the whole sample, forcing the model to keep
+            # redundant pathways rather than leaning on any single input.
+            drop = (np.random.rand(len(self.channels)) < self.chan_drop) & keep
+            if drop.any():
+                x[:, drop] = 0.0
+        return x
 
     def _flip(self, x: np.ndarray, target: np.ndarray, fuel: np.ndarray,
               ew: bool | None = None, ns: bool | None = None):

@@ -1,0 +1,250 @@
+# REGULARISATION VARIANT: reg_drop. See the README regularisation section.
+# Baseline config — Phase 6 values from CLAUDE.md, plus Phase 1-3 pipeline params.
+
+paths:
+  raw_firms: data/raw/firms
+  raw_hrrr: data/raw/hrrr          # scratch only — GRIBs are deleted after windowing
+  hrrr_windows: data/processed/hrrr
+  raw_landfire: data/raw/landfire
+  raw_dem: data/raw/dem
+  samples: data/processed/samples
+  splits: data/processed/splits
+  norm_stats: configs/norm_stats.json
+
+region:
+  # California bounding box (lon_min, lat_min, lon_max, lat_max) — EPSG:4326
+  bbox: [-124.5, 32.5, -114.1, 42.0]
+  crs: "EPSG:5070"
+
+firms:
+  source: VIIRS_SNPP_SP      # SP = standard processing (archive). NRT only for <2 months old.
+  start_date: "2015-01-01"
+  end_date: "2023-12-31"
+  min_confidence: nominal    # one of: low, nominal, high
+  vegetation_fires_only: true  # FIRMS `type` == 0
+
+  # Spans where the sensor produced no data, so absence of detections does NOT
+  # mean absence of fire. Verified via `python -m pipeline.download audit`.
+  # Label generation must not build samples whose input or target window overlaps
+  # these, and events must not be linked across them.
+  # Decision: stay on S-NPP for label homogeneity and drop the gap, rather than
+  # splicing in NOAA-20 (which only exists from 2018-04 and would raise label
+  # density partway through the study period).
+  no_data_windows:
+    - ["2022-07-27", "2022-08-10"]   # S-NPP VIIRS outage; NOAA-20/MODIS saw fire here
+
+landfire:
+  layers: [FBFM40, CC, CH]     # band order in the output GeoTIFF follows this list
+  output_projection: 5070
+  aoi_margin_km: 20
+
+  # Versions that actually carry FBFM40/CC/CH, verified against /api/products.
+  # LF2014 ships disturbance only and LF2020 topography only, so there is no
+  # pre-2016 fuel map to pair with 2015-2016 fires.
+  available_fuel_versions: [LF2016, LF2022, LF2023, LF2024, LF2025]
+
+  # LANDFIRE rewrites fuels to reflect burn scars, so a version published AFTER a
+  # fire encodes that fire's own footprint — the model could read the target off
+  # the input. Never use "nearest year"; only versions strictly before ignition.
+  #   fixed        -> one snapshot for every fire (homogeneous across splits)
+  #   latest_prior -> newest version whose year precedes the fire (fresher, but the
+  #                   test split would span two fuel versions)
+  version_strategy: fixed
+  fixed_version: LF2016
+  # LF2016 includes disturbance through 2016, so 2015-2016 fires are mildly
+  # contaminated under either strategy. Flagged, not silently included.
+  contaminated_before_year: 2017
+
+events:
+  # Spatiotemporal clustering of detections into fire events
+  link_distance_km: 2.0      # ~5 VIIRS pixels at 375 m
+  link_time_hours: 96        # a fire can go quiet for up to 4 days between detections
+  min_detections: 25         # discard specks; roughly >= ~3 km^2 cumulative
+  # CLAUDE.md Phase 2 says discard fires with < 3 timesteps, but that is one short of
+  # what the model can actually use: a sample needs `model.t_steps` windows of history
+  # AND a target window, so 4 usable windows is the true floor. Measured over the full
+  # archive: of 105 fires with exactly 3 usable windows, 5 yielded any sample at all.
+  # Left at 3 so `keep` stays comparable with the numbers already recorded; the fires
+  # simply contribute nothing, and `sample_index.parquet` is the authority on what is
+  # actually trainable (479 fires, not 622).
+  min_timesteps: 3
+
+labels:
+  # S-NPP is sun-synchronous: all detections land in two ~4 h bands per day (08-11Z
+  # and 19-22Z). At 6 h, 59.6% of windows contain no overpass at all and their targets
+  # are falsely empty. Measured empty rates: 3h 75.6%, 6h 59.6%, 12h 21.1%, 24h 8.9%.
+  # 24 h also matches Huot et al. 2022 "Next Day Wildfire Spread", so CSI is comparable.
+  window_hours: 24
+  # A 375 m VIIRS pixel is 3.75 cells at 100 m. Radius 1 spans +-1 cell and leaves a
+  # 1.75-cell gap between neighbouring detections, giving a stippled, non-contiguous
+  # perimeter. Radius 2 spans +-2, so 2+2 > 3.75 and blobs merge.
+  dilation_px: 2
+  # Dilation alone does not close the perimeter: detections along a front are sparser
+  # than one per 375 m pixel and scan geometry stretches spacing toward the swath edge.
+  # At dil=2 the Camp mask breaks into 274 components (fill ratio 0.74). Morphological
+  # CLOSING bridges those gaps without pushing the outer boundary out the way more
+  # dilation would. Calibrated against official acreage (Camp/Creek/Caldor/Mosquito):
+  #   dil=2         0.57-0.97x, 64-274 components
+  #   dil=4         0.87-1.15x,   1-5  components   (over-inflates)
+  #   dil=2 close=4 0.80-1.08x,   1-12 components   <- chosen
+  closing_px: 4
+  # Flag a window only when 2+ consecutive windows were missed — an actual outage,
+  # not one skipped overpass.
+  max_gap_hours: 48
+
+grid:
+  patch_size: 256
+  resolution_m: 100
+
+sampling:
+  # DECIDED (option A): tile the active perimeter instead of taking one crop centred
+  # on the perimeter centroid. A single centred 256 patch keeps only 58.5% of windows
+  # for the largest fire quintile, so megafires would be represented only while small.
+  # Samples are indexed by (fire_id, timestep, tile_index).
+  scheme: tiled
+  tile_stride_px: 128        # 50% overlap between neighbouring tiles
+  # Phase 8 clipping. Measured: 57.6% of tiles have target growth touching an edge, so
+  # dropping them would discard most of the data. Reconsidered and set to false, because
+  # under *tiling* an edge-touching target is not a label error — every pixel inside the
+  # tile genuinely burned, and growth continuing past the edge is captured by the
+  # neighbouring tile. The real cost is truncated context for edge pixels, and at 50%
+  # overlap every pixel is interior to some tile. Flag retained for analysis and for
+  # optional down-weighting of the outer ring in the loss.
+  drop_tiles_with_clipped_target: false
+  # Splits MUST group by fire_id: tiles of one fire sharing train and test would leak.
+  group_splits_by: fire_id
+
+  # Chronological, but NOT the 2015-2019 / 2020-2021 / 2022-2023 boundary in CLAUDE.md
+  # Phase 7. Measured on the built dataset, that split put 69.7% of samples in validation
+  # against 21.7% in training: 2020 and 2021 are the two most extreme seasons on record,
+  # tiling multiplies each megafire into many tiles, and train additionally lost the most
+  # to weather gaps because 2015-2016 HRRR is least complete. Training on 22% while
+  # selecting models on 70% is not defensible.
+  #
+  # Moving 2020 into training gives 63.7 / 27.7 / 8.6, keeps strict chronology (so the
+  # temporal-generalisation claim survives) and keeps fire_id grouping intact.
+  # Cost to watch: validation is now a single season, 47 fires dominated by Dixie and
+  # Caldor, so val CSI is a narrower signal than the sample count suggests.
+  split_years:
+    train: [2015, 2020]
+    val: [2021, 2021]
+    test: [2022, 2023]
+
+  # Materialising 26,876 tiles as (3,12,256,256) costs 254 GB fp32 / 127 GB fp16 against
+  # 83 GB free. Store per-fire rasters instead and crop tiles in __getitem__: ~11 GB.
+  materialise_tiles: false
+
+storage:
+  # HRRR GRIBs are streamed, windowed, then deleted — retaining them costs ~204 GB.
+  keep_raw_hrrr_grib: false
+  hrrr_window_margin_cells: 20    # HRRR cells kept around each fire (3 km each)
+  hrrr_step_hours: 6              # 6 h matches the T, T-6h, T-12h feature set (~34 GB transfer)
+  # Per-fire 10 m DEM is ~160 GB across 692 fires; one statewide 100 m grid is ~0.5 GB.
+  # Validated against the 10 m clips on the MVP fires: elevation MAE 1.6-2.4 m, slope
+  # MAE 0.55-0.84 deg, aspect correlation 0.985-0.995.
+  dem_mode: statewide_100m
+  # 3DEP stops at the US border, so fires straddling Mexico have partial elevation.
+  # Median-filling a mostly-empty DEM would fabricate terrain, so refuse below this.
+  min_dem_coverage: 0.98
+
+model:
+  t_steps: 3                 # 3 x 24 h = 3 days of history
+  t_horizon_h: 24            # must match labels.window_hours
+  hidden_dims: [64, 128, 256]
+
+  # Authoritative channel order. The feature builder, norm_stats.json and the
+  # Dataset's flip augmentation all key off this list by index, so it must not be
+  # reordered without recomputing norm stats.
+  #
+  # CLAUDE.md Phase 3 declares C=12, but its own channel table lists 14 rows and
+  # omits cc, tpi, elevation and Fosberg -- all of which the pipeline builds or the
+  # "Derived Features" section requires. The real count is 17 continuous plus fuel.
+  #
+  # Each sequence step is a self-contained weather snapshot with its own 6 h history:
+  # step k is the label window ending at T - k*window_hours, and its wind lags are
+  # relative to *that step's* time, not the sample's T. So a sample spans
+  # window_hours*(t_steps-1) + 12 h = 60 h of weather.
+  channels:
+    - burn_mask            # labels, binary, cumulative up to this step
+    - u10_lag0             # wind U at this step's time
+    - u10_lag6             #   ... 6 h earlier
+    - u10_lag12            #   ... 12 h earlier
+    - v10_lag0             # wind V, same three lags
+    - v10_lag6
+    - v10_lag12
+    - rh2m                 # at this step's time
+    - t2m
+    - fosberg_10h          # dead fuel moisture, derived from t2m + rh2m
+    - elevation_centred    # per-fire mean removed -- see elevation_mode
+    - slope
+    - aspect_sin
+    - aspect_cos
+    - tpi
+    - cc
+    - ch
+  # Fuel is categorical and rides alongside as an int index, embedded in the model
+  # rather than concatenated here. One-hot over 40 classes would be mostly empty
+  # (29 classes observed) and the raw codes are not ordinal (91 urban, 101 grass,
+  # 165 timber litter), so an index fed as a number asserts an order that is meaningless.
+  fuel_embed_dim: 8
+
+  # Ablation switch for the elevation channel. Measured over the 661 MVP tiles,
+  # elevation is the only static channel whose variance is mostly *between* tiles
+  # (59.3%; every other channel is under 18%), which makes its absolute level a
+  # per-fire identity handle rather than terrain information. Centring per fire
+  # keeps the within-patch gradient -- including the km-scale valley-to-ridge rise
+  # that the 300 m TPI cannot see -- and drops the identity component.
+  #   fire_centred | raw | none
+  dropout: 0.15
+  elevation_mode: fire_centred
+
+  # Overlap-tile option: feed a wider input, supervise only the centre, so every
+  # predicted pixel sees full surrounding context instead of a padded edge. Measured on
+  # the 3090: 512 px input costs 21.87 GB at **batch 4**, and OOMs at 8. That is 4x the
+  # per-sample cost for 4x fewer samples per step, against the README's own finding that
+  # 512 px does 1.69x the pixel work per epoch. The extra VRAM does not make this pay --
+  # left off. Set to 256 (with a 512 px crop in the Dataset) to enable.
+  supervise_centre: null
+
+train:
+  # Measured on the RTX 3090 (24 GB, 22.8 GB free) with the real 17+8 channel input,
+  # AMP on, full forward/backward/step, sustained over 6 iterations:
+  #   batch 12 -> 16.45 GB, 663 ms/step
+  #   batch 16 -> 21.91 GB, 828 ms/step   <- current
+  #   batch 24 -> spills to system RAM
+  # Gradient accumulation was an 8 GB workaround for reaching an effective batch of 16;
+  # batch 16 now fits natively, so it is dropped.
+  #
+  # Caveat: 21.91 of 22.8 GB free is 96%, which is stable but leaves no headroom.
+  #
+  # **Then measured end-to-end throughput, which reverses the choice.** With DataLoader
+  # workers and pinned buffers also resident, batch 16 thrashes the allocator:
+  #   batch 16, 4 workers  1.89 s/step   8.5 samples/s  11.1 min/epoch  21.9 GB
+  #   batch 12, 6 workers  0.58 s/step  20.7 samples/s   3.6 min/epoch  16.5 GB  <- current
+  #   batch  8, 4 workers  0.43 s/step  18.7 samples/s   4.0 min/epoch  11.0 GB
+  # Batch 12 is 2.4x faster than batch 16 despite being smaller, and more workers made
+  # 16 worse still (2.38 s at 8, 2.58 s at 12) -- contention, not starvation. Fitting is
+  # not the same as being fast; 100 epochs goes from ~21 h to ~8 h.
+  weight_decay: 0.01
+  batch_size: 12
+  num_workers: 6
+  lr: 1.0e-4
+  epochs: 100
+  early_stopping_patience: 10
+  loss: weighted_bce          # weighted_bce | focal
+  # Aggregate class-imbalance ratio over the training split, computed from the index if
+  # left null. Aggregate (total unburned / total burned = 102.8) rather than the median
+  # sample: the median sample is far sparser than the mean (0.247% vs 0.964% positive),
+  # so weighting by it implies ~404 and pushes the model to over-predict badly.
+  pos_weight: null
+  focal_alpha: 0.25           # only used when loss: focal
+  focal_gamma: 2.0
+  grad_clip: 1.0
+  amp: true
+  lr_restart_epochs: 10       # T_0 for cosine annealing with warm restarts, T_mult=2
+  device: cuda
+
+splits:
+  train_years: [2015, 2016, 2017, 2018, 2019]
+  val_years: [2020, 2021]
+  test_years: [2022, 2023]

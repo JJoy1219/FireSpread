@@ -24,7 +24,8 @@ from model.convlstm_unet import ConvBlock
 class UNet(nn.Module):
     def __init__(self, in_channels: int, t_steps: int, fuel_classes: int,
                  fuel_embed_dim: int = 8, hidden_dims: tuple[int, ...] = (64, 128, 256),
-                 out_channels: int = 1, supervise_centre: int | None = None):
+                 out_channels: int = 1, supervise_centre: int | None = None,
+                 dropout: float = 0.0):
         super().__init__()
         self.fuel_embed = nn.Embedding(fuel_classes, fuel_embed_dim)
         self.supervise_centre = supervise_centre
@@ -34,7 +35,7 @@ class UNet(nn.Module):
         self.encoders = nn.ModuleList()
         prev = c_in
         for d in dims:
-            self.encoders.append(ConvBlock(prev, d))
+            self.encoders.append(ConvBlock(prev, d, dropout))
             prev = d
         self.pool = nn.MaxPool2d(2)
 
@@ -42,7 +43,7 @@ class UNet(nn.Module):
         self.dec = nn.ModuleList()
         for i in range(len(dims) - 1, 0, -1):
             self.ups.append(nn.ConvTranspose2d(dims[i], dims[i - 1], 2, stride=2))
-            self.dec.append(ConvBlock(dims[i - 1] * 2, dims[i - 1]))
+            self.dec.append(ConvBlock(dims[i - 1] * 2, dims[i - 1], dropout))
         self.head = nn.Conv2d(dims[0], out_channels, 1)
 
     def forward(self, x: torch.Tensor, fuel: torch.Tensor) -> torch.Tensor:

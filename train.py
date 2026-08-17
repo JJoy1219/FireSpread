@@ -116,9 +116,14 @@ def make_loss(cfg: dict, device: str):
         w = cfg["train"].get("pos_weight")
         w = float(w) if w else pos_weight_from_index(cfg)
         pw = torch.tensor(w, device=device)
+        # Label smoothing targets the failure mode actually observed: validation loss
+        # roughly doubles while CSI stays flat, i.e. the model grows overconfident rather
+        # than less discriminative. Smoothing caps the reward for extreme logits.
+        eps = float(cfg["train"].get("label_smoothing", 0.0))
 
         def loss_fn(logits, target):
-            return F.binary_cross_entropy_with_logits(logits, target, pos_weight=pw)
+            t = target * (1 - eps) + 0.5 * eps if eps > 0 else target
+            return F.binary_cross_entropy_with_logits(logits, t, pos_weight=pw)
 
         return loss_fn, w
     if name == "focal":
@@ -181,12 +186,16 @@ def train(cfg: dict, args) -> None:
         model = UNet(n_ch, int(cfg["model"]["t_steps"]), FUEL_N_CLASSES,
                      int(cfg["model"].get("fuel_embed_dim", 8)),
                      tuple(cfg["model"]["hidden_dims"]),
-                     supervise_centre=cfg["model"].get("supervise_centre")).to(device)
+                     supervise_centre=cfg["model"].get("supervise_centre"),
+                     dropout=float(cfg["model"].get("dropout", 0.0))).to(device)
     else:
         model = build_model(cfg, FUEL_N_CLASSES, n_ch).to(device)
 
     loss_fn, pw = make_loss(cfg, device)
-    opt = torch.optim.Adam(model.parameters(), lr=float(tc["lr"]))
+    # AdamW rather than Adam: with Adam, L2 weight decay is scaled by the per-parameter
+    # adaptive step and effectively vanishes for the parameters that need it most.
+    wd = float(tc.get("weight_decay", 0.0))
+    opt = torch.optim.AdamW(model.parameters(), lr=float(tc["lr"]), weight_decay=wd)
     # Cosine annealing with warm restarts, per CLAUDE.md. T_0 in epochs.
     sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         opt, T_0=int(tc.get("lr_restart_epochs", 10)), T_mult=2)

@@ -23,16 +23,24 @@ from model.convlstm import ConvLSTMLayer
 
 
 class ConvBlock(nn.Module):
-    """Two 3x3 convs with GroupNorm — the decoder's workhorse."""
+    """Two 3x3 convs with GroupNorm — the decoder's workhorse.
 
-    def __init__(self, in_ch: int, out_ch: int):
+    `dropout` uses Dropout2d (whole feature maps), not per-element dropout: adjacent
+    pixels in a conv feature map are strongly correlated, so per-element dropout is a
+    weak regulariser on spatial data.
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, dropout: float = 0.0):
         super().__init__()
-        self.block = nn.Sequential(
+        layers = [
             nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
             nn.GroupNorm(min(8, out_ch), out_ch), nn.ReLU(inplace=True),
             nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
             nn.GroupNorm(min(8, out_ch), out_ch), nn.ReLU(inplace=True),
-        )
+        ]
+        if dropout > 0:
+            layers.append(nn.Dropout2d(dropout))
+        self.block = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.block(x)
@@ -41,7 +49,7 @@ class ConvBlock(nn.Module):
 class ConvLSTMUNet(nn.Module):
     def __init__(self, in_channels: int, fuel_classes: int, fuel_embed_dim: int = 8,
                  hidden_dims: tuple[int, ...] = (64, 128, 256), out_channels: int = 1,
-                 supervise_centre: int | None = None):
+                 supervise_centre: int | None = None, dropout: float = 0.0):
         super().__init__()
         self.fuel_embed = nn.Embedding(fuel_classes, fuel_embed_dim)
         self.supervise_centre = supervise_centre
@@ -62,7 +70,7 @@ class ConvLSTMUNet(nn.Module):
         self.dec = nn.ModuleList()
         for i in range(len(dims) - 1, 0, -1):
             self.ups.append(nn.ConvTranspose2d(dims[i], dims[i - 1], 2, stride=2))
-            self.dec.append(ConvBlock(dims[i - 1] * 2, dims[i - 1]))
+            self.dec.append(ConvBlock(dims[i - 1] * 2, dims[i - 1], dropout))
         self.head = nn.Conv2d(dims[0], out_channels, 1)
 
     def forward(self, x: torch.Tensor, fuel: torch.Tensor) -> torch.Tensor:
@@ -110,4 +118,5 @@ def build_model(cfg: dict, fuel_classes: int, in_channels: int) -> ConvLSTMUNet:
         fuel_embed_dim=int(m.get("fuel_embed_dim", 8)),
         hidden_dims=tuple(m["hidden_dims"]),
         supervise_centre=m.get("supervise_centre"),
+        dropout=float(m.get("dropout", 0.0)),
     )
