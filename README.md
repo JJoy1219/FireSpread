@@ -1162,6 +1162,56 @@ learning to use it. Plausible reasons, in the order worth testing:
 - **Class weighting swamps it.** At `pos_weight` ~103 the loss is dominated by getting the bulk of
   the perimeter roughly right; directional detail is a rounding error in the gradient.
 
+## Regularisation: three arms, no usable gain
+
+```bash
+python train.py --config configs/reg_wd.yaml   --model unet --hidden-dims 112,224,448
+python train.py --config configs/reg_drop.yaml --model unet --hidden-dims 112,224,448
+python train.py --config configs/reg_aug.yaml  --model unet --hidden-dims 112,224,448
+```
+
+Motivated by every run overfitting from about epoch 8 on 4,507 samples with flip-only
+augmentation. Note the shape of that overfit first: **CSI saturates by epoch 4-6** at ~0.25 and
+only creeps to ~0.26 over the next 15 epochs while validation loss roughly doubles. The model was
+not losing discrimination, it was growing overconfident — so the arms targeted calibration and
+effective dataset size, not raw capacity.
+
+| arm | change | val CSI | test CSI | test Brier | per-fire median |
+|---|---|---|---|---|---|
+| baseline (3-seed mean) | — | 0.2604 | 0.1952 | **0.0196** | **0.1082** |
+| `reg_wd` | AdamW wd 0.01 | 0.2649 | — | — | — |
+| `reg_drop` | + Dropout2d 0.15 | 0.2602 | — | — | — |
+| `reg_aug` | + smoothing, noise, channel dropout | **0.2697** | 0.1986 | 0.2804 | 0.0930 |
+
+**None of them helps.** Weight decay and dropout land inside seed noise (+-0.0039 on validation).
+`reg_aug` posts the best validation CSI of any run — and it is a mirage: test CSI gains 0.0034
+(inside noise), per-fire median CSI *falls*, and the Brier score is **14x worse**.
+
+### Label smoothing multiplies with `pos_weight`
+
+`reg_aug` predicts >0.5 for **98.97% of all pixels**, median probability 0.515, against the
+baseline's 0.002. Weighted BCE puts the optimum for a smoothed target `t` at
+
+    p* = w*t / (w*t + 1 - t)
+
+so a negative pixel at eps=0.02 (t=0.01) under `pos_weight` 103 is pulled to **p* = 0.510** —
+the measured median is 0.515. The smoothing floor gets amplified by the class weight, so eps must
+be scaled by roughly 1/`pos_weight` to be harmless; 0.02 here behaves like 2.0 would unweighted.
+`train.py` now warns when `label_smoothing * pos_weight` exceeds 0.1.
+
+**CSI never showed this.** At a 0.95 threshold it read 0.1986, entirely healthy, because CSI is
+blind to a uniformly shifted probability floor. Only the Brier score and the probability histogram
+exposed it — which is the argument for reporting both.
+
+### Why regularisation was the wrong lever
+
+The null result is consistent with the occlusion finding above: the model draws ~89% of its skill
+from the burn mask, so it is not over-fitting a rich feature space that needs constraining — it is
+fitting a simple geometric rule about as well as that rule can be fitted. Constraining weights
+cannot create signal the model is not using. The next lever is the input, not the optimiser:
+`burn_mask_mode: incremental` removes the shortcut and forces the physical channels to carry
+weight.
+
 ## Storage budget — do NOT materialise samples
 
 Measured on this machine: **83 GB free of 475 GB.** That is the binding constraint on the whole

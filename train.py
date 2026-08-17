@@ -116,10 +116,18 @@ def make_loss(cfg: dict, device: str):
         w = cfg["train"].get("pos_weight")
         w = float(w) if w else pos_weight_from_index(cfg)
         pw = torch.tensor(w, device=device)
-        # Label smoothing targets the failure mode actually observed: validation loss
-        # roughly doubles while CSI stays flat, i.e. the model grows overconfident rather
-        # than less discriminative. Smoothing caps the reward for extreme logits.
+        # Label smoothing MULTIPLIES with pos_weight — set it with care.
+        # Weighted BCE puts the optimum for a smoothed target t at
+        #     p* = w*t / (w*t + 1 - t)
+        # so a negative pixel with eps=0.02 (t=0.01) under w=103 is pulled to p*=0.510.
+        # Measured: the reg_aug run predicted >0.5 for 98.97% of pixels, median 0.515 —
+        # matching that formula — and its Brier score was 14x worse than baseline while
+        # CSI looked fine, because CSI at a 0.95 threshold is blind to a shifted floor.
+        # Scale eps by roughly 1/pos_weight if using it at all.
         eps = float(cfg["train"].get("label_smoothing", 0.0))
+        if eps > 0 and eps * w > 0.1:
+            print(f"  WARNING: label_smoothing {eps} with pos_weight {w:.0f} pulls negative "
+                  f"pixels to p={w*eps/(w*eps + 1 - eps):.2f}; consider eps <= {0.1/w:.4f}")
 
         def loss_fn(logits, target):
             t = target * (1 - eps) + 0.5 * eps if eps > 0 else target

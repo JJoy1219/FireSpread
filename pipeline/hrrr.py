@@ -340,13 +340,31 @@ def _parse_stamp(s: str) -> pd.Timestamp:
 
 
 def _sync_store(grp, stamps: list[str], bounds: tuple, overwrite: bool = False) -> None:
-    """Make the store hold exactly `stamps`, carrying over rows already fetched.
+    """Make the store hold `stamps` **plus everything already fetched**.
 
-    Needed because gap repair grows the hour list after the fact; rows are matched by
-    timestamp, never by position, so re-syncing never silently reindexes data.
+    A union, not a replacement. Rows are matched by timestamp, never by position, so
+    re-syncing cannot silently reindex data.
+
+    The union matters: gap-repair hours (the +/-1 h neighbours of an archive hole) belong
+    to no needed-set, so an exact-match sync silently deletes them. That happened when
+    fetching the t_steps=5 hours — the t5 needed-set is a superset of t3's, so the base
+    hours survived, but every repair hour was dropped and previously bridgeable gaps
+    became unbridgeable. Four training runs died on it.
     """
+    if not overwrite:
+        already = {s for s, f in zip(grp.attrs.get("times", []),
+                                     np.asarray(grp["filled"]) if "filled" in grp else [])
+                   if f}
+        stamps = sorted(set(stamps) | already, key=_parse_stamp)
+
     old_times = list(grp.attrs.get("times", []))
-    if not overwrite and old_times == stamps and "filled" in grp:
+    # The early return must also verify the arrays agree with `times`. Skipping that
+    # check let a store damaged by an earlier crash stay damaged: 66 fires ended up with
+    # `data` shorter than `times`, or `times` shorter than `filled`, and the mismatch only
+    # surfaced later as a zarr BoundsCheckError deep inside a training run.
+    consistent = ("filled" in grp and grp["filled"].shape[0] == len(old_times)
+                  and ("data" not in grp or grp["data"].shape[0] == len(old_times)))
+    if not overwrite and old_times == stamps and consistent:
         return
 
     new_filled = np.zeros(len(stamps), dtype=bool)
@@ -355,9 +373,12 @@ def _sync_store(grp, stamps: list[str], bounds: tuple, overwrite: bool = False) 
         old = grp["data"]
         pos = {s: i for i, s in enumerate(old_times)}
         buf = np.zeros((len(stamps), *old.shape[1:]), dtype="float32")
+        # Guard against BOTH arrays: `filled` and `data` can disagree in length if an
+        # earlier sync grew the stamp list without rebuilding the data array.
+        limit = min(len(old_filled), old.shape[0])
         for ni, s in enumerate(stamps):
             oi = pos.get(s)
-            if oi is not None and oi < len(old_filled) and bool(old_filled[oi]):
+            if oi is not None and oi < limit and bool(old_filled[oi]):
                 buf[ni] = old[oi]
                 new_filled[ni] = True
         grp.create_array("data", shape=buf.shape, dtype="float32",
@@ -610,10 +631,17 @@ def download_all(fire_ids: list[str], cfg: dict, overwrite: bool = False,
             r = download_event(fid, cfg, overwrite=False, repair_rounds=repair_rounds)
             repaired += len(r.get("repaired", []))
 
-    for fid, g in groups.items():
+    # Re-open rather than reusing the handles from before the repair pass. `download_event`
+    # extends `times` on disk during repair, but these handles still hold the pre-repair
+    # attrs; writing through them flushes the whole cached dict and reverts `times` while
+    # `filled`/`data` stay long. That left 61 stores with times < filled == data, which
+    # only surfaced much later as a zarr BoundsCheckError inside a training run.
+    for fid in per_fire:
+        g = zarr.open_group(root / f"{fid}.zarr", mode="a")
+        times_now = list(g.attrs.get("times", []))
         filled = np.asarray(g["filled"])
-        g.attrs["missing"] = [s for s, f in zip(per_fire[fid], filled) if not f]
-        g.attrs["rh_derived"] = sorted(set(per_fire[fid]) & RH_DERIVED)
+        g.attrs["missing"] = [s for s, f in zip(times_now, filled) if not f]
+        g.attrs["rh_derived"] = sorted(set(times_now) & RH_DERIVED)
 
     stored = sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) / 1e9
     return {"fires": len(per_fire), "skipped": len(skipped), "fire_hours": fire_hours,
