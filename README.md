@@ -1061,11 +1061,41 @@ fails to replicate on held-out fires.
 constructed specifically to require it.** The U-Net is the better engineering choice: simpler,
 cheaper, better calibrated at t_steps=3, and 4x fewer epochs to converge here.
 
-Caveat that bounds the strength of this claim: **one seed per arm**. The gaps are 2-4%, small
-enough that seed variance is a live alternative explanation for any individual comparison. What
-makes the conclusion robust is not any single number but that the sign flips between splits — a
-real architectural advantage would not do that. Three to five seeds per arm would settle it
-properly and is the obvious next step if the architecture choice is ever revisited.
+### Three seeds per arm settles it
+
+```bash
+python train.py --model convlstm_unet --seed 1 --name convlstm_unet_s1
+python train.py --model unet --hidden-dims 112,224,448 --seed 1 --name unet_wide_s1
+```
+
+The one-seed conclusion above rested on a sign flip between splits. With **three seeds per arm**
+on the t_steps=3 config (mean +/- sample SD):
+
+| metric | ConvLSTM | U-Net | difference |
+|---|---|---|---|
+| validation CSI | **0.2657** +/- 0.0021 | 0.2604 +/- 0.0039 | ConvLSTM +0.0053 |
+| test CSI (pooled) | 0.1874 +/- 0.0048 | **0.1952** +/- 0.0045 | U-Net +0.0078 |
+| test CSI (per fire) | 0.0986 +/- 0.0060 | **0.1082** +/- 0.0041 | U-Net +0.0095 |
+| test Brier | 0.0247 +/- 0.0061 | **0.0196** +/- 0.0010 | U-Net -0.0052 |
+
+Seeds: ConvLSTM 0.2641 / 0.2650 / 0.2681, U-Net 0.2639 / 0.2612 / 0.2562.
+
+**The sign flip is real and reproducible, not a fluke of one seed.** The ConvLSTM wins validation
+in all three seeds; the U-Net wins test in all three. Each gap is ~1.7 pooled SD — consistent
+within an arm, and consistently in opposite directions across splits.
+
+A model that is reliably better on one split and reliably worse on another is not a better model.
+It is a model that fits the validation season more closely. Validation here is a single season of
+47 fires dominated by Dixie and Caldor, so the ConvLSTM's extra capacity buys agreement with
+*those* fires and does not transfer to 2022-2023.
+
+**On held-out fires the U-Net wins on every measure**: +4.2% pooled CSI, +9.7% per-fire CSI, and
+a 21% lower Brier score with a fifth of the seed variance (0.0010 against 0.0061). Better
+calibration with less run-to-run scatter is the more useful property operationally.
+
+**Verdict, now properly supported: use the U-Net.** Equal or better on held-out data, better
+calibrated, more stable across seeds, simpler, and cheaper. The ConvLSTM's validation advantage is
+a measurement of overfitting to the validation season, not of skill.
 
 Note the t_steps=5 test numbers (0.2049 / 0.2088) are **not** comparable to the t_steps=3 ones
 (0.1849 / 0.2003): the t5 test split holds 451 samples over 79 fires against 607 over 113,
