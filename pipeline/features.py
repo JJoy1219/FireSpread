@@ -314,8 +314,18 @@ _HOURS: dict[tuple, np.ndarray] = {}
 
 
 def tile_sampler(fire_id: str, cfg: dict, row0: int, col0: int, patch: int) -> Bilinear:
+    """Cached bilinear sampler for one tile, with a bounded cache.
+
+    Each entry holds a (2, patch, patch) float32 coordinate grid — 512 KB at patch 256 —
+    and there are thousands of distinct tiles. Left unbounded this grew to ~1 GB per
+    DataLoader worker over a long run, and with six workers the resulting memory pressure
+    doubled epoch time partway through training (6.7 -> 12.9 min) with the GPU still at
+    100% and no thermal throttling. Bounded the same way as `_HOURS`.
+    """
     key = (fire_id, row0, col0, patch)
     if key not in _SAMPLER:
+        if len(_SAMPLER) > 256:
+            _SAMPLER.clear()
         g = zarr.open_group(ROOT / cfg["paths"]["hrrr_windows"] / f"{fire_id}.zarr", mode="r")
         ny, nx = g["lon"].shape
         r, c = hrrr_index_grid(fire_id, cfg, row0, col0, patch)
@@ -590,7 +600,7 @@ def main() -> None:
     elif a.what == "weather":
         # Weather is never materialised, so "building" it means proving every sample in
         # the index can produce a finite, physical tensor on demand.
-        idx_path = ROOT / "data/processed/sample_index.parquet"
+        idx_path = ROOT / cfg["paths"].get("sample_index", "data/processed/sample_index.parquet")
         idx = pd.read_parquet(idx_path)
         rows, keep_rows = [], []
         for fid in ids:
@@ -655,7 +665,7 @@ def main() -> None:
     else:
         parts = [build_index(f, cfg) for f in ids]
         idx = pd.concat([p for p in parts if not p.empty], ignore_index=True)
-        out = ROOT / "data/processed/sample_index.parquet"
+        out = ROOT / cfg["paths"].get("sample_index", "data/processed/sample_index.parquet")
         idx.to_parquet(out, index=False)
         per = idx.groupby("fire_id").agg(
             samples=("t_index", "size"), timesteps=("t_index", "nunique"),

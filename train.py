@@ -89,7 +89,7 @@ def pos_weight_from_index(cfg: dict) -> float:
     is far sparser than the mean — 0.247% against 0.964% — so weighting by it implies
     ~404 instead of ~103 and would push the model to over-predict badly.
     """
-    idx = pd.read_parquet(ROOT / "data/processed/sample_index.parquet")
+    idx = pd.read_parquet(ROOT / cfg["paths"].get("sample_index", "data/processed/sample_index.parquet"))
     sub = idx[idx["fire_id"].isin(set(read_split(cfg, "train")))]
     px = int(cfg["grid"]["patch_size"]) ** 2
     pos = float(sub["n_target_px"].sum())

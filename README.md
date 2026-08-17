@@ -1032,10 +1032,45 @@ signature of the extra capacity being spent on overfitting rather than on tempor
 ConvLSTM U-Net as the target architecture; on this data, at this sequence length, that choice is
 not supported.
 
-Worth testing before treating it as settled: a longer sequence (`t_steps` 5-7) and dropping the
-cumulative-mask channel would give the recurrence something the feed-forward path cannot already
-see. If the ConvLSTM cannot win under those conditions either, the architecture should be retired
-for this task.
+### The decisive test: 5 days of history, no cumulative shortcut
+
+```bash
+python train.py --config configs/ablation_t5.yaml --model convlstm_unet
+python train.py --config configs/ablation_t5.yaml --model unet --hidden-dims 112,224,448
+```
+
+Two of the three explanations above blame the *inputs*, not the architecture, so the fair test is
+to remove both crutches: `t_steps: 5` for five days of history, and `burn_mask_mode: incremental`
+so each step carries only that window's new burn. Fire history is then recoverable **only** by
+integrating the sequence — exactly the job the recurrence exists to do. Removing the burn channel
+outright was rejected as it makes the task unsolvable; the model must know where the fire is.
+
+Own index (6,777 samples / 343 fires), own norm stats, batch 8 for both arms.
+
+| model | params | epochs | val CSI | test CSI | test Brier |
+|---|---|---|---|---|---|
+| ConvLSTM U-Net | 5.35 M | 45 | **0.2586** | 0.2049 | **0.01951** |
+| U-Net, capacity-matched | 5.76 M | 18 | 0.2487 | **0.2088** | 0.02096 |
+
+**The ConvLSTM wins validation by 4.0% and loses test by 1.9%.** The advantage does not transfer,
+which is the definition of noise rather than signal. Across all four comparisons now run — two
+configurations x two splits — the U-Net is equal or better in three, and the single ConvLSTM win
+fails to replicate on held-out fires.
+
+**Verdict: the recurrence provides no reliable benefit on this task, even when the inputs are
+constructed specifically to require it.** The U-Net is the better engineering choice: simpler,
+cheaper, better calibrated at t_steps=3, and 4x fewer epochs to converge here.
+
+Caveat that bounds the strength of this claim: **one seed per arm**. The gaps are 2-4%, small
+enough that seed variance is a live alternative explanation for any individual comparison. What
+makes the conclusion robust is not any single number but that the sign flips between splits — a
+real architectural advantage would not do that. Three to five seeds per arm would settle it
+properly and is the obvious next step if the architecture choice is ever revisited.
+
+Note the t_steps=5 test numbers (0.2049 / 0.2088) are **not** comparable to the t_steps=3 ones
+(0.1849 / 0.2003): the t5 test split holds 451 samples over 79 fires against 607 over 113,
+because requiring five windows of history drops the shorter fires. Comparisons are valid only
+within a configuration.
 
 ## Storage budget — do NOT materialise samples
 

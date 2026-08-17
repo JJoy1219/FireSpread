@@ -100,15 +100,17 @@ def read_split(cfg: dict, split: str) -> list[str]:
 
 class WildfireDataset(Dataset):
     def __init__(self, cfg: dict, split: str, norm_stats: dict | None = None,
-                 augment: bool = False, index_path: str = "data/processed/sample_index.parquet"):
+                 augment: bool = False, index_path: str | None = None):
         self.cfg = cfg
         self.split = split
         self.augment = augment
         self.patch = int(cfg["grid"]["patch_size"])
         self.t_steps = int(cfg["model"]["t_steps"])
         self.channels = channel_names(cfg)
+        self.burn_mode = str(cfg["model"].get("burn_mask_mode", "cumulative"))
 
-        idx = pd.read_parquet(ROOT / index_path)
+        idx = pd.read_parquet(ROOT / (index_path or cfg["paths"].get(
+            "sample_index", "data/processed/sample_index.parquet")))
         fires = set(read_split(cfg, split))
         self.index = idx[idx["fire_id"].isin(fires)].reset_index(drop=True)
 
@@ -152,9 +154,15 @@ class WildfireDataset(Dataset):
         steps = np.zeros((self.t_steps, p, p), dtype="float32")
         first = t - (self.t_steps - 1)
         for k in range(0, t + 1):                      # accumulate from ignition
-            cum |= np.asarray(burn[k][sl]) > 0
+            new_k = np.asarray(burn[k][sl]) > 0
+            cum |= new_k
             if k >= first:
-                steps[k - first] = cum
+                # `cumulative` hands each step the whole history as a static channel, so
+                # the feed-forward path can read "where the fire has been" without any
+                # recurrence — which is one reason the ConvLSTM ablation found the
+                # recurrence redundant. `incremental` gives each step only that window's
+                # new burn, so history is recoverable ONLY by integrating the sequence.
+                steps[k - first] = cum if self.burn_mode == "cumulative" else new_k
         target = (np.asarray(burn[t + 1][sl]) > 0) & ~cum
         return steps, target.astype("float32")
 

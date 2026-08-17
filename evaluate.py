@@ -88,7 +88,7 @@ def predict_split(cfg: dict, model, split: str, device: str, workers: int, amp: 
 def baseline_counts(cfg: dict, split: str) -> dict:
     """Dilation-ring and persistence baselines, read straight from the label zarrs."""
     patch = int(cfg["grid"]["patch_size"])
-    idx = pd.read_parquet(ROOT / "data/processed/sample_index.parquet")
+    idx = pd.read_parquet(ROOT / cfg["paths"].get("sample_index", "data/processed/sample_index.parquet"))
     idx = idx[idx["fire_id"].isin(set(read_split(cfg, split)))]
     out = {k: {"tp": 0.0, "fp": 0.0, "fn": 0.0} for k in ("persistence",) + BASELINE_RINGS}
     for fid, grp in idx.groupby("fire_id"):
