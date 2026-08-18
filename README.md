@@ -764,11 +764,11 @@ temporal-generalisation claim survives, and keeps `fire_id` grouping intact:
 
 | split | years | samples | share | fires | median positive | implied `pos_weight` | clipped |
 |---|---|---|---|---|---|---|---|
-| train | 2015-2020 | **4,507** | 63.7% | 290 | 0.247% | 404 | 34.5% |
+| train | 2015-2020 | **4,502** | 63.7% | 290 | 0.247% | 404 | 34.5% |
 | val | 2021 | 1,956 | 27.7% | 47 | 0.339% | 294 | 44.2% |
 | test | 2022-2023 | 607 | 8.6% | 113 | 0.078% | 1,284 | 4.0% |
 
-Train grew 2.9x, from 1,537 to 4,507.
+Train grew 2.9x, from 1,537 to 4,502.
 
 **Two costs to keep in view.** Validation is now a single season and only 47 fires, dominated by
 Dixie and Caldor, so val CSI is a narrower signal than 1,956 samples suggests — early stopping on
@@ -1170,7 +1170,7 @@ python train.py --config configs/reg_drop.yaml --model unet --hidden-dims 112,22
 python train.py --config configs/reg_aug.yaml  --model unet --hidden-dims 112,224,448
 ```
 
-Motivated by every run overfitting from about epoch 8 on 4,507 samples with flip-only
+Motivated by every run overfitting from about epoch 8 on 4,502 samples with flip-only
 augmentation. Note the shape of that overfit first: **CSI saturates by epoch 4-6** at ~0.25 and
 only creeps to ~0.26 over the next 15 epochs while validation loss roughly doubles. The model was
 not losing discrimination, it was growing overconfident — so the arms targeted calibration and
