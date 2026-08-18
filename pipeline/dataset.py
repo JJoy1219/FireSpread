@@ -21,6 +21,7 @@ import torch
 import zarr
 from torch.utils.data import Dataset
 
+from pipeline.bands import band_index, distance_to_burn
 from pipeline.download import ROOT, load_config
 from pipeline.features import WEATHER_CHANNELS, static_tile, weather_tile
 
@@ -108,6 +109,9 @@ class WildfireDataset(Dataset):
         self.t_steps = int(cfg["model"]["t_steps"])
         self.channels = channel_names(cfg)
         self.burn_mode = str(cfg["model"].get("burn_mask_mode", "cumulative"))
+        # Emitting the distance-band map costs a distance transform per sample, so it is
+        # only built when the loss actually consumes it. Computed in DataLoader workers.
+        self.emit_band = bool(cfg["train"].get("band_pos_weight", False))
         aug = cfg.get("sampling", {}).get("augment", {}) or {}
         self.noise_std = float(aug.get("noise_std", 0.0))
         self.chan_drop = float(aug.get("channel_dropout", 0.0))
@@ -142,8 +146,13 @@ class WildfireDataset(Dataset):
                 ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
         return self._labels[fire_id]
 
-    def _burn(self, fire_id: str, t: int, row0: int, col0: int) -> tuple[np.ndarray, np.ndarray]:
-        """Cumulative burn for each sequence step, and the target for window t+1.
+    def _burn(self, fire_id: str, t: int, row0: int, col0: int
+              ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Cumulative burn per step, the target for window t+1, and total extent at t.
+
+        The third return value is the union up to t. It is needed for the distance
+        bands and cannot be recovered from `steps` under `burn_mask_mode: incremental`,
+        where no single step holds the full extent.
 
         Step s carries the cumulative burn at that step's own window, matching the
         weather semantics: step s corresponds to window `t - (t_steps-1-s)`.
@@ -167,14 +176,14 @@ class WildfireDataset(Dataset):
                 # new burn, so history is recoverable ONLY by integrating the sequence.
                 steps[k - first] = cum if self.burn_mode == "cumulative" else new_k
         target = (np.asarray(burn[t + 1][sl]) > 0) & ~cum
-        return steps, target.astype("float32")
+        return steps, target.astype("float32"), cum
 
     def __getitem__(self, i: int) -> dict:
         r = self.index.iloc[i]
         fid, t = str(r["fire_id"]), int(r["t_index"])
         row0, col0 = int(r["row0"]), int(r["col0"])
 
-        burn, target = self._burn(fid, t, row0, col0)
+        burn, target, cum = self._burn(fid, t, row0, col0)
         wx = weather_tile(fid, t, self.cfg, row0, col0, self.patch)
         if wx is None:
             raise RuntimeError(f"{fid} t={t} has an unbridgeable weather gap; "
@@ -189,16 +198,21 @@ class WildfireDataset(Dataset):
         ], axis=1)
         x = (x - self.mean[None, :, None, None]) / self.std[None, :, None, None]
 
+        band = band_index(distance_to_burn(cum)) if self.emit_band else None
+
         if self.augment:
-            x, target, fuel = self._flip(x, target, fuel)
+            x, target, fuel, band = self._flip(x, target, fuel, band=band)
             x = self._jitter(x)
 
-        return {
+        out = {
             "input": torch.from_numpy(np.ascontiguousarray(x, dtype="float32")),
             "fuel": torch.from_numpy(np.ascontiguousarray(fuel)).long(),
             "target": torch.from_numpy(np.ascontiguousarray(target, dtype="float32")),
             "meta": {"fire_id": fid, "t_index": t, "row0": row0, "col0": col0},
         }
+        if band is not None:
+            out["band"] = torch.from_numpy(np.ascontiguousarray(band)).long()
+        return out
 
     def _jitter(self, x: np.ndarray) -> np.ndarray:
         """Gaussian noise and channel dropout on the CONTINUOUS channels only.
@@ -227,7 +241,8 @@ class WildfireDataset(Dataset):
         return x
 
     def _flip(self, x: np.ndarray, target: np.ndarray, fuel: np.ndarray,
-              ew: bool | None = None, ns: bool | None = None):
+              ew: bool | None = None, ns: bool | None = None,
+              band: np.ndarray | None = None):
         """Flips, negating every channel that encodes a direction.
 
         This is the part of the augmentation that is easy to get silently wrong. A flip
@@ -248,15 +263,21 @@ class WildfireDataset(Dataset):
         east = [ch[c] for c in ("u10_lag0", "u10_lag6", "u10_lag12", "aspect_sin") if c in ch]
         north = [ch[c] for c in ("v10_lag0", "v10_lag6", "v10_lag12", "aspect_cos") if c in ch]
 
+        # The band map is spatial, so it must mirror with everything else. Leaving it
+        # unflipped would pair each pixel's loss weight with a different pixel's distance.
         if ew:                                         # mirror east-west: flip columns
             x = x[..., ::-1].copy()
             target, fuel = target[:, ::-1].copy(), fuel[:, ::-1].copy()
             x[:, east] *= -1.0
+            if band is not None:
+                band = band[:, ::-1].copy()
         if ns:                                         # mirror north-south: flip rows
             x = x[..., ::-1, :].copy()
             target, fuel = target[::-1].copy(), fuel[::-1].copy()
             x[:, north] *= -1.0
-        return x, target, fuel
+            if band is not None:
+                band = band[::-1].copy()
+        return x, target, fuel, band
 
 
 def compute_norm_stats(cfg: dict, max_samples: int = 400, seed: int = 0) -> dict:
@@ -369,7 +390,7 @@ def run_checks(cfg: dict, split: str) -> None:
         ("east-west", dict(ew=True, ns=False), ("u10_lag0", "aspect_sin"), ("v10_lag0", "aspect_cos")),
         ("north-south", dict(ew=False, ns=True), ("v10_lag0", "aspect_cos"), ("u10_lag0", "aspect_sin")),
     ):
-        fx, _, _ = ds._flip(x.copy(), tgt.copy(), fu.copy(), **flags)
+        fx, _, _, _ = ds._flip(x.copy(), tgt.copy(), fu.copy(), **flags)
         # x[:, c] is (t_steps, H, W): east-west mirrors W (last axis), north-south H.
         mirror = (lambda a: a[..., ::-1]) if flags["ew"] else (lambda a: a[:, ::-1, :])
         for c in negated:

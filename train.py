@@ -28,6 +28,8 @@ from torch.utils.data import DataLoader
 
 from model.convlstm_unet import build_model
 from model.unet import UNet
+from pipeline.bands import (BAND_LABELS, FAR_BAND_MIN, N_BANDS, band_pos_weights,
+                            load_band_stats)
 from pipeline.dataset import WildfireDataset, channel_names, read_split
 from pipeline.download import ROOT, load_config
 from pipeline.features import FUEL_N_CLASSES
@@ -82,6 +84,38 @@ class Counts:
         return out
 
 
+class BandCounts:
+    """TP/FP/FN per distance band, at one threshold.
+
+    Pooled CSI cannot show whether a change helped where it was aimed. Skill is
+    overwhelmingly a near-perimeter effect -- CSI 0.30 at 0.2 km against 0.002 by
+    2 km -- so a loss change that trades near-ring precision for far-field recall
+    reads as a regression on the pooled number while doing exactly what it was
+    built to do. `far_csi` pools the bands from FAR_BAND_MIN outward.
+    """
+
+    def __init__(self) -> None:
+        self.tp = np.zeros(N_BANDS)
+        self.fp = np.zeros(N_BANDS)
+        self.fn = np.zeros(N_BANDS)
+
+    def update(self, prob, target, band, thr: float) -> None:
+        p, t = prob > thr, target > 0.5
+        b = band.reshape(-1)
+        for name, m in (("tp", p & t), ("fp", p & ~t), ("fn", ~p & t)):
+            hit = torch.bincount(b[m.reshape(-1)], minlength=N_BANDS)
+            getattr(self, name)[:] += hit.detach().cpu().numpy()
+
+    def csi(self):
+        d = self.tp + self.fp + self.fn
+        return np.where(d > 0, self.tp / np.maximum(d, 1.0), np.nan)
+
+    def far_csi(self) -> float:
+        tp = self.tp[FAR_BAND_MIN:].sum()
+        d = tp + self.fp[FAR_BAND_MIN:].sum() + self.fn[FAR_BAND_MIN:].sum()
+        return float(tp / d) if d > 0 else 0.0
+
+
 def pos_weight_from_index(cfg: dict) -> float:
     """Class-imbalance ratio over the training split, from the index alone.
 
@@ -129,11 +163,45 @@ def make_loss(cfg: dict, device: str):
             print(f"  WARNING: label_smoothing {eps} with pos_weight {w:.0f} pulls negative "
                   f"pixels to p={w*eps/(w*eps + 1 - eps):.2f}; consider eps <= {0.1/w:.4f}")
 
-        def loss_fn(logits, target):
+        def loss_fn(logits, target, band=None):
             t = target * (1 - eps) + 0.5 * eps if eps > 0 else target
             return F.binary_cross_entropy_with_logits(logits, t, pos_weight=pw)
 
         return loss_fn, w
+
+    if name == "band_weighted_bce":
+        # One global pos_weight is itself part of why the model builds rings. Positives
+        # are ~10.1% of candidate pixels 0.1-0.2 km out but ~0.18% past 3.2 km, so the
+        # balancing weight each band needs, (1-p)/p, runs from 8.9 to 552. Applying a
+        # single 103 over-weights near positives ~12x and under-weights far ones ~5x,
+        # which instructs the model to pile probability mass onto the perimeter.
+        #
+        # Rates come from the TRAIN split only (analysis/band_stats.py); taking them from
+        # val or test would leak held-out statistics into the loss.
+        cap = float(cfg["train"].get("band_weight_cap", 300.0))
+        stats = load_band_stats(cfg)
+        bw = torch.as_tensor(band_pos_weights(stats, cap), device=device)
+        print(f"  per-band positive weight (train base rates, cap {cap:g}):")
+        for b in range(N_BANDS):
+            if int(stats["n_pixels"][b]) == 0:
+                continue
+            raw = (1 - stats["base_rate"][b]) / max(stats["base_rate"][b], 1e-12)
+            flag = "  CAPPED" if raw > cap else ""
+            print(f"    {BAND_LABELS[b]:>12}  rate {stats['base_rate'][b]:7.4%}  "
+                  f"w {bw[b].item():7.1f}  (uncapped {raw:.1f}){flag}")
+
+        def loss_fn(logits, target, band=None):
+            if band is None:
+                raise RuntimeError("band_weighted_bce needs the band map; set "
+                                   "train.band_pos_weight: true so the Dataset emits it")
+            # `weight` scales whichever BCE term is active at each pixel, so a map of
+            # bw[band] on positives and 1 on negatives IS a per-pixel pos_weight.
+            w_px = torch.where(target > 0.5, bw[band], torch.ones_like(target))
+            return F.binary_cross_entropy_with_logits(logits, target, weight=w_px)
+
+        # Reported as the mean weight actually applied to positives, so the startup line
+        # stays comparable with the single-value runs.
+        return loss_fn, float(bw[bw > 1].mean().item())
     if name == "focal":
         a = float(cfg["train"].get("focal_alpha", 0.25))
         g = float(cfg["train"].get("focal_gamma", 2.0))
@@ -154,21 +222,27 @@ def loaders(cfg: dict, workers: int, smoke: bool):
 
 
 @torch.no_grad()
-def validate(model, loader, loss_fn, device, amp, limit=None) -> tuple[float, list[dict]]:
+def validate(model, loader, loss_fn, device, amp, limit=None):
     model.eval()
     counts = Counts.zeros(len(THRESHOLDS))
+    bands: dict = {}
     total, n = 0.0, 0
     for i, b in enumerate(loader):
         if limit and i >= limit:
             break
         x, fuel, y = b["input"].to(device), b["fuel"].to(device), b["target"].to(device)
+        bd = b["band"].to(device) if "band" in b else None
         with torch.amp.autocast("cuda", dtype=torch.float16, enabled=amp):
             logits = model(x, fuel).squeeze(1)
-            loss = loss_fn(logits.float(), y)
+            loss = loss_fn(logits.float(), y, bd)
         total += loss.item() * len(y)
         n += len(y)
-        counts.update(torch.sigmoid(logits.float()), y)
-    return total / max(n, 1), counts.metrics()
+        prob = torch.sigmoid(logits.float())
+        counts.update(prob, y)
+        if bd is not None:
+            for thr in THRESHOLDS:
+                bands.setdefault(thr, BandCounts()).update(prob, y, bd, thr)
+    return total / max(n, 1), counts.metrics(), bands
 
 
 def train(cfg: dict, args) -> None:
@@ -246,9 +320,10 @@ def train(cfg: dict, args) -> None:
                 break
             x, fuel, y = b["input"].to(device, non_blocking=True), \
                 b["fuel"].to(device, non_blocking=True), b["target"].to(device, non_blocking=True)
+            bd = b["band"].to(device, non_blocking=True) if "band" in b else None
             with torch.amp.autocast("cuda", dtype=torch.float16, enabled=amp):
                 logits = model(x, fuel).squeeze(1)
-                loss = loss_fn(logits.float(), y)
+                loss = loss_fn(logits.float(), y, bd)
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             # Unscale before clipping or the threshold applies to scaled gradients.
@@ -263,15 +338,34 @@ def train(cfg: dict, args) -> None:
                       flush=True)
         sched.step()
 
-        val_loss, mets = validate(model, val_dl, loss_fn, device, amp,
-                                  limit=4 if args.smoke else None)
+        val_loss, mets, bands = validate(model, val_dl, loss_fn, device, amp,
+                                         limit=4 if args.smoke else None)
         best = max(mets, key=lambda m: m["csi"])
         at_half = next(m for m in mets if m["threshold"] == 0.5)
-        if best["threshold"] == max(THRESHOLDS):
-            # The optimum is outside the sweep, so CSI is understated and epoch ranking
-            # may be distorted. Widen THRESHOLDS rather than ignoring this.
-            print(f"  WARNING: best threshold {best['threshold']} is the top of the sweep")
+        if best["threshold"] in (max(THRESHOLDS), min(THRESHOLDS)):
+            # The optimum is at or outside a sweep edge, so CSI is understated and epoch
+            # ranking may be distorted. Widen THRESHOLDS rather than ignoring this.
+            # Both edges matter: weighted_bce pushes the optimum up near 0.95, while
+            # band_weighted_bce lowers the average positive weight and pulls it down
+            # toward 0.2, so the bottom is the live edge for per-band runs.
+            edge = "top" if best["threshold"] == max(THRESHOLDS) else "bottom"
+            print(f"  WARNING: best threshold {best['threshold']} is the {edge} of the sweep")
+        # The selection metric is pre-registered in the config, not picked afterwards.
+        # `far_csi` exists because this loss aims at the far field, where pooled CSI is
+        # nearly insensitive: 88% of all growth lies inside 1.2 km.
+        sel_name = str(tc.get("select_metric", "csi"))
+        if sel_name == "far_csi" and not bands:
+            raise SystemExit("select_metric far_csi needs train.band_pos_weight: true")
+        far_csi = bands[best["threshold"]].far_csi() if bands else float("nan")
+        sel = far_csi if sel_name == "far_csi" else best["csi"]
+
         secs = time.perf_counter() - t0
+        if bands:
+            bc = bands[best["threshold"]].csi()
+            print("  CSI by distance: " + "  ".join(
+                f"{BAND_LABELS[b].split()[0]} {bc[b]:.3f}"
+                for b in range(N_BANDS) if not np.isnan(bc[b])), flush=True)
+            print(f"  far CSI (>= 1.2 km) {far_csi:.4f}   pooled {best['csi']:.4f}", flush=True)
         print(f"epoch {epoch}: train {running/max(seen,1):.4f}  val {val_loss:.4f}  "
               f"CSI {best['csi']:.4f} @thr {best['threshold']}  "
               f"(CSI@0.5 {at_half['csi']:.4f})  FAR {best['far']:.3f}  POD {best['pod']:.3f}  "
@@ -287,19 +381,23 @@ def train(cfg: dict, args) -> None:
                  "threshold": best["threshold"], "cfg_channels": channel_names(cfg),
                  "model_kind": args.model}
         torch.save(state, ckpt_dir / "last.pt")
-        if best["csi"] > best_csi:
-            best_csi, bad = best["csi"], 0
+        if sel > best_csi:
+            best_csi, bad = sel, 0
             state["best_csi"] = best_csi
+            state["select_metric"] = sel_name
+            state["far_csi"] = far_csi
+            state["pooled_csi"] = best["csi"]
             torch.save(state, ckpt_dir / "best.pt")
-            print(f"  new best CSI {best_csi:.4f} -> {ckpt_dir/'best.pt'}")
+            print(f"  new best {sel_name} {best_csi:.4f} -> {ckpt_dir/'best.pt'}")
         else:
             bad += 1
             if bad >= patience:
-                print(f"early stop: {patience} epochs without CSI improvement")
+                print(f"early stop: {patience} epochs without {sel_name} improvement")
                 break
 
     log.close()
-    print(f"\nbest validation CSI {best_csi:.4f}  |  {ckpt_dir/'best.pt'}")
+    print(f"\nbest validation {str(tc.get('select_metric', 'csi'))} {best_csi:.4f}"
+          f"  |  {ckpt_dir/'best.pt'}")
 
 
 def main() -> None:

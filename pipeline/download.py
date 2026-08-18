@@ -33,9 +33,32 @@ API = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 MAX_DAY_RANGE = 5  # hard limit imposed by the FIRMS area API (verified empirically)
 
 
+class _NoDuplicatesLoader(yaml.SafeLoader):
+    """SafeLoader that refuses duplicate mapping keys.
+
+    Every config variant in this project is a copy of baseline.yaml with a few keys
+    changed, which makes an accidental second copy of a key easy to introduce and
+    almost invisible: plain YAML keeps the LAST value silently. That already produced
+    a perband.yaml whose `loss` reverted to `weighted_bce`, which would have run as a
+    baseline while reporting as a new arm. Failing loudly is much cheaper than
+    debugging an experiment that never applied its own change.
+    """
+
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping", node.start_mark,
+                    f"duplicate key {key!r}", key_node.start_mark)
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def load_config(path: str | Path = "configs/baseline.yaml") -> dict:
     with open(ROOT / path, encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+        return yaml.load(fh, Loader=_NoDuplicatesLoader)
 
 
 def get_map_key() -> str:
