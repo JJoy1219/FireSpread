@@ -18,7 +18,7 @@ import pandas as pd
 import zarr
 
 from pipeline.bands import BAND_LABELS, N_BANDS, band_index, distance_to_burn
-from pipeline.download import ROOT, load_config
+from pipeline.download import ROOT, label_dir, load_config
 from pipeline.dataset import read_split
 
 
@@ -52,7 +52,7 @@ def main() -> None:
         row0, col0 = int(r.row0), int(r.col0)
         if fid not in groups:
             groups[fid] = zarr.open_group(
-                ROOT / "data/processed/labels" / f"{fid}.zarr", mode="r")
+                label_dir(cfg) / f"{fid}.zarr", mode="r")
         burn = groups[fid]["burn_new"]
         sl = (slice(row0, row0 + patch), slice(col0, col0 + patch))
 

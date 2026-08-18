@@ -28,7 +28,7 @@ import zarr
 from affine import Affine
 from scipy.ndimage import binary_closing, binary_dilation
 
-from pipeline.download import ROOT, load_config
+from pipeline.download import ROOT, label_dir, load_config
 
 
 def fire_grid(row: pd.Series, margin_m: float, res: float) -> tuple[Affine, int, int]:
@@ -171,7 +171,7 @@ def main() -> None:
 
     cfg = load_config(args.config)
     det = pd.read_parquet(ROOT / "data/processed/detections_labeled.parquet")
-    out_dir = ROOT / "data/processed/labels"
+    out_dir = label_dir(cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.all:
@@ -195,7 +195,7 @@ def main() -> None:
                   f"({r['raw_mb']:.0f} MB raw, {r['raw_mb']/max(r['mb'],1e-9):.0f}x compressed)")
 
     man = pd.DataFrame(rows)
-    out = ROOT / "data/processed/labels_manifest.csv"
+    out = out_dir.parent / f"{out_dir.name}_manifest.csv"
     man.to_csv(out, index=False)
     if "mb" in man:
         print(f"\n{len(man)} fires, {man['mb'].sum():.1f} MB on disk "

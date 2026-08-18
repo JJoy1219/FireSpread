@@ -33,7 +33,7 @@ from PIL import Image
 
 from model.unet import UNet
 from pipeline.dataset import WildfireDataset, channel_names
-from pipeline.download import ROOT, load_config
+from pipeline.download import ROOT, label_dir, load_config
 from pipeline.features import FUEL_N_CLASSES, static_tile
 
 MAX_PX = 448          # longest raster side in the bundle; keeps the page under the size cap
@@ -127,7 +127,7 @@ def export_fire(fire_id: str, cfg: dict, model, ds, device, thr: float) -> dict 
         print(f"  {fire_id}: no samples in this split, skipping")
         return None
     patch = int(cfg["grid"]["patch_size"])
-    lg = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    lg = zarr.open_group(label_dir(cfg) / f"{fire_id}.zarr", mode="r")
     burn = np.asarray(lg["burn_new"]) > 0
     cum = np.cumsum(burn, axis=0) > 0
     _, H, W = burn.shape

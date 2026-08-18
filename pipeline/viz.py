@@ -20,7 +20,7 @@ import xarray as xr
 from matplotlib.colors import Normalize
 from pyproj import Transformer
 
-from pipeline.download import ROOT, load_config
+from pipeline.download import ROOT, label_dir, load_config
 
 TF = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
 
@@ -203,11 +203,11 @@ def plot_layers(fire_id: str, title: str, out: Path) -> Path:
 
 
 def plot_labels(fire_id: str, title: str, out: Path, n_panels: int = 4,
-                horizon_steps: int = 1) -> Path:
+                horizon_steps: int = 1, cfg: dict | None = None) -> Path:
     """Show real (label, target) training pairs: burned-so-far vs the next 6 h of growth."""
     import zarr
 
-    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    g = zarr.open_group(label_dir(cfg) / f"{fire_id}.zarr", mode="r")
     burn = g["burn_new"]
     times = [pd.Timestamp(t) for t in g.attrs["window_times"]]
     usable = np.array(g.attrs["usable"], dtype=bool)

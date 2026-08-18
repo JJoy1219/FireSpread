@@ -22,7 +22,7 @@ import zarr
 from torch.utils.data import Dataset
 
 from pipeline.bands import band_index, distance_to_burn
-from pipeline.download import ROOT, load_config
+from pipeline.download import ROOT, label_dir, load_config
 from pipeline.features import WEATHER_CHANNELS, static_tile, weather_tile
 
 # Fallback only; `sampling.split_years` in the config is authoritative. See the note
@@ -143,7 +143,7 @@ class WildfireDataset(Dataset):
     def _label_group(self, fire_id: str):
         if fire_id not in self._labels:
             self._labels[fire_id] = zarr.open_group(
-                ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+                label_dir(self.cfg) / f"{fire_id}.zarr", mode="r")
         return self._labels[fire_id]
 
     def _burn(self, fire_id: str, t: int, row0: int, col0: int

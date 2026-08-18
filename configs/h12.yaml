@@ -6,11 +6,18 @@ paths:
   hrrr_windows: data/processed/hrrr
   raw_landfire: data/raw/landfire
   raw_dem: data/raw/dem
-  labels: data/processed/labels    # window length is baked in, so a 12 h
-                                   # rebuild must target a different directory
+  # 12 h arm. Every artefact below is window-length dependent and MUST be
+  # separate, or the 24 h results stop being reproducible. `hrrr_windows` is
+  # deliberately shared: the store's pinned window_slice is spatial, and the fire
+  # grid comes from the event bounding box, so 12 h and 24 h see the same cells.
+  # Only extra ANALYSIS HOURS are needed, and _sync_store unions rather than
+  # replaces, so fetching them leaves the 24 h hours intact.
+  labels: data/processed/labels_12h
+  sample_index: data/processed/sample_index_12h.parquet
   samples: data/processed/samples
   splits: data/processed/splits
-  norm_stats: configs/norm_stats.json
+  norm_stats: configs/norm_stats_12h.json
+  band_stats: configs/band_stats_12h.json
 
 region:
   # California bounding box (lon_min, lat_min, lon_max, lat_max) — EPSG:4326
@@ -75,7 +82,21 @@ labels:
   # and 19-22Z). At 6 h, 59.6% of windows contain no overpass at all and their targets
   # are falsely empty. Measured empty rates: 3h 75.6%, 6h 59.6%, 12h 21.1%, 24h 8.9%.
   # 24 h also matches Huot et al. 2022 "Next Day Wildfire Spread", so CSI is comparable.
-  window_hours: 24
+  # THE VARIABLE UNDER TEST. At 24 h each window averages one afternoon run and
+  # one overnight lull together, so the wind at T is diluted by a full diurnal
+  # cycle. S-NPP overpasses fall in two bands, 08-11Z and 19-22Z, so 12 h windows
+  # separate day from night and should let wind's contribution show if it exists.
+  #
+  # Cost: 21.1% of 12 h windows contain no overpass against 8.9% at 24 h. Those are
+  # NOT scored as false zeros -- labels.py sets `usable = has_det & ~gap_flag &
+  # ~nodata`, so an unobserved window cannot serve as a target. The cost is fewer
+  # usable samples, not corrupted labels, which keeps the comparison clean.
+  #
+  # Note this breaks CSI comparability with Huot et al. 2022, which is 24 h. That
+  # is acceptable here: the question is whether HRRR matters MORE or LESS at a
+  # shorter horizon, which is answered by the occlusion delta within this project,
+  # not by an external benchmark.
+  window_hours: 12
   # A 375 m VIIRS pixel is 3.75 cells at 100 m. Radius 1 spans +-1 cell and leaves a
   # 1.75-cell gap between neighbouring detections, giving a stippled, non-contiguous
   # perimeter. Radius 2 spans +-2, so 2+2 > 3.75 and blobs merge.
@@ -89,8 +110,13 @@ labels:
   #   dil=4         0.87-1.15x,   1-5  components   (over-inflates)
   #   dil=2 close=4 0.80-1.08x,   1-12 components   <- chosen
   closing_px: 4
-  # Flag a window only when 2+ consecutive windows were missed — an actual outage,
-  # not one skipped overpass.
+  # Held at 48 h deliberately. The rule measures observation STALENESS in hours
+  # (`gap_h = (b - last).total_seconds() / 3600`), not a window count, so keeping
+  # the same value holds the label-quality criterion identical across the two arms.
+  # The baseline comment's "2+ consecutive windows" describes what 48 h happens to
+  # mean at 24 h windows; at 12 h the same 48 h spans four windows. Matching the
+  # window count instead would have meant changing the physical threshold, which
+  # would confound the very thing being measured.
   max_gap_hours: 48
 
 grid:
@@ -149,8 +175,8 @@ storage:
   min_dem_coverage: 0.98
 
 model:
-  t_steps: 3                 # 3 x 24 h = 3 days of history
-  t_horizon_h: 24            # must match labels.window_hours
+  t_steps: 3                 # 3 x 12 h = 36 h of history
+  t_horizon_h: 12            # must match labels.window_hours
   hidden_dims: [64, 128, 256]
 
   # Authoritative channel order. The feature builder, norm_stats.json and the

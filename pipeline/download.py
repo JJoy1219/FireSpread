@@ -61,6 +61,19 @@ def load_config(path: str | Path = "configs/baseline.yaml") -> dict:
         return yaml.load(fh, Loader=_NoDuplicatesLoader)
 
 
+def label_dir(cfg: dict | None = None) -> Path:
+    """Directory holding the per-fire label zarrs.
+
+    Config-driven because the window length is baked into the rasterised labels.
+    A 12 h rebuild must land somewhere else than the 24 h store, or every result
+    produced so far becomes unreproducible. Defaults to the 24 h location so any
+    caller without a config in hand keeps the historical behaviour.
+    """
+    if cfg is None:
+        return ROOT / "data/processed/labels"
+    return ROOT / cfg["paths"].get("labels", "data/processed/labels")
+
+
 def get_map_key() -> str:
     """Read the FIRMS MAP_KEY from the environment or a local .env file."""
     key = os.environ.get("FIRMS_MAP_KEY")

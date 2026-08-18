@@ -37,7 +37,7 @@ from pyproj import Transformer
 from rasterio.warp import Resampling, reproject
 from scipy.ndimage import map_coordinates, uniform_filter
 
-from pipeline.download import ROOT, load_config
+from pipeline.download import ROOT, load_config, label_dir
 
 # Scott & Burgan 40 codes are sparse (91-204). Map them to a dense index so the model
 # can use a small embedding table rather than a 205-wide one-hot.
@@ -72,9 +72,9 @@ WEATHER_CHANNELS = ["u10_lag0", "u10_lag6", "u10_lag12",
                     "rh2m", "t2m", "fosberg_10h"]
 
 
-def label_grid(fire_id: str) -> tuple[Affine, int, int, str]:
+def label_grid(fire_id: str, cfg: dict | None = None) -> tuple[Affine, int, int, str]:
     """Read the authoritative grid back from the label zarr."""
-    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    g = zarr.open_group(label_dir(cfg) / f"{fire_id}.zarr", mode="r")
     t = g.attrs["transform"]
     h, w = g["burn_new"].shape[1:]
     return Affine(*t), h, w, g.attrs["crs"]
@@ -148,7 +148,7 @@ def fuel_dense_index(codes: np.ndarray) -> tuple[np.ndarray, dict]:
 
 
 def build_static(fire_id: str, cfg: dict, overwrite: bool = False) -> dict:
-    transform, h, w, crs = label_grid(fire_id)
+    transform, h, w, crs = label_grid(fire_id, cfg)
     res = float(cfg["grid"]["resolution_m"])
     dest = ROOT / "data/processed/features" / f"{fire_id}.zarr"
     if dest.exists():
@@ -277,7 +277,7 @@ def hrrr_index_grid(fire_id: str, cfg: dict, row0: int, col0: int,
     Done per tile rather than per fire because regridding a whole fire at 100 m for
     all 9 wind times would cost ~120 MB per sample for a fire the size of Creek.
     """
-    tr, H, W, crs = label_grid(fire_id)
+    tr, H, W, crs = label_grid(fire_id, cfg)
     g = zarr.open_group(ROOT / cfg["paths"]["hrrr_windows"] / f"{fire_id}.zarr", mode="r")
     x0, y0, dx, dy = hrrr_affine(np.asarray(g["lon"]), np.asarray(g["lat"]))
 
@@ -411,7 +411,7 @@ def weather_tile(fire_id: str, t_index: int, cfg: dict, row0: int, col0: int,
     window_hours*(t_steps-1) + 12 h of weather. See `model.channels` in the config.
     """
     patch = patch or int(cfg["grid"]["patch_size"])
-    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    g = zarr.open_group(label_dir(cfg) / f"{fire_id}.zarr", mode="r")
     times = [pd.Timestamp(t) for t in g.attrs["window_times"]]
     window_h = int(g.attrs["window_hours"])
     t_steps = int(cfg["model"]["t_steps"])
@@ -500,7 +500,7 @@ def build_index(fire_id: str, cfg: dict) -> pd.DataFrame:
     res = float(gc["resolution_m"])
     t_steps = int(cfg["model"]["t_steps"])
 
-    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    g = zarr.open_group(label_dir(cfg) / f"{fire_id}.zarr", mode="r")
     burn = g["burn_new"]
     usable = np.array(g.attrs["usable"], dtype=bool)
     times = [pd.Timestamp(t) for t in g.attrs["window_times"]]

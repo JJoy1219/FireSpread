@@ -36,7 +36,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from pyproj import Transformer
 
-from pipeline.download import ROOT, load_config
+from pipeline.download import ROOT, load_config, label_dir
 
 BUCKET = "noaa-hrrr-bdp-pds"
 # (short name in the .idx, level string in the .idx) -> our channel name
@@ -171,7 +171,7 @@ def needed_hours(fire_id: str, cfg: dict) -> pd.DatetimeIndex:
     the 18h-offset hour is never read by any feature. Hence ~25% less transfer than
     the `storage.hrrr_step_hours` budget in the README assumed.
     """
-    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    g = zarr.open_group(label_dir(cfg) / f"{fire_id}.zarr", mode="r")
     window_h = int(g.attrs["window_hours"])
     usable = np.array(g.attrs["usable"], dtype=bool)
     times = [pd.Timestamp(t) for t in g.attrs["window_times"]]
@@ -188,9 +188,9 @@ def needed_hours(fire_id: str, cfg: dict) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(sorted(wanted))
 
 
-def fire_window_bounds(fire_id: str, margin_km: float) -> tuple[float, float, float, float]:
+def fire_window_bounds(fire_id: str, margin_km: float, cfg: dict | None = None) -> tuple[float, float, float, float]:
     """Fire raster bounds in lon/lat, padded by `margin_km`."""
-    g = zarr.open_group(ROOT / "data/processed/labels" / f"{fire_id}.zarr", mode="r")
+    g = zarr.open_group(label_dir(cfg) / f"{fire_id}.zarr", mode="r")
     a, b, c, d, e, f = g.attrs["transform"][:6]
     _, H, W = g["burn_new"].shape
     xs = [c, c + a * W]
@@ -434,7 +434,7 @@ def download_event(
         return {"fire_id": fire_id, "error": f"before HRRR epoch {HRRR_EPOCH:%Y-%m-%d}"}
 
     store = ROOT / cfg["paths"]["hrrr_windows"] / f"{fire_id}.zarr"
-    bounds = fire_window_bounds(fire_id, float(cfg["storage"]["hrrr_window_margin_cells"]) * 3.0)
+    bounds = fire_window_bounds(fire_id, float(cfg["storage"]["hrrr_window_margin_cells"]) * 3.0, cfg)
 
     if dry_run:
         return {"fire_id": fire_id, "hours_requested": len(hours), "hours_ok": 0,
@@ -576,7 +576,7 @@ def download_all(fire_ids: list[str], cfg: dict, overwrite: bool = False,
     groups, bounds, slices, pos = {}, {}, {}, {}
     for fid, stamps in per_fire.items():
         g = zarr.open_group(root / f"{fid}.zarr", mode="a")
-        b = fire_window_bounds(fid, float(cfg["storage"]["hrrr_window_margin_cells"]) * 3.0)
+        b = fire_window_bounds(fid, float(cfg["storage"]["hrrr_window_margin_cells"]) * 3.0, cfg)
         _sync_store(g, stamps, b, overwrite)
         groups[fid], bounds[fid] = g, b
         pos[fid] = {s: i for i, s in enumerate(stamps)}

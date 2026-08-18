@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader
 from model.convlstm_unet import build_model
 from model.unet import UNet
 from pipeline.dataset import WildfireDataset, channel_names, read_split
-from pipeline.download import ROOT, load_config
+from pipeline.download import ROOT, label_dir, load_config
 from pipeline.features import FUEL_N_CLASSES
 
 THRESHOLDS = (0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98)
@@ -47,10 +47,10 @@ def scores(tp: float, fp: float, fn: float) -> dict:
             "pod": tp / max(tp + fn, 1.0)}
 
 
-def fire_sizes() -> pd.Series:
+def fire_sizes(cfg: dict) -> pd.Series:
     """Total burned cells per fire — a direct size measure, not a detection proxy."""
     out = {}
-    for p in (ROOT / "data/processed/labels").glob("*.zarr"):
+    for p in (label_dir(cfg)).glob("*.zarr"):
         g = zarr.open_group(p, mode="r")
         out[p.stem] = int((np.asarray(g["burn_new"]) > 0).sum())
     return pd.Series(out, name="burned_px")
@@ -92,7 +92,7 @@ def baseline_counts(cfg: dict, split: str) -> dict:
     idx = idx[idx["fire_id"].isin(set(read_split(cfg, split)))]
     out = {k: {"tp": 0.0, "fp": 0.0, "fn": 0.0} for k in ("persistence",) + BASELINE_RINGS}
     for fid, grp in idx.groupby("fire_id"):
-        g = zarr.open_group(ROOT / "data/processed/labels" / f"{fid}.zarr", mode="r")
+        g = zarr.open_group(label_dir(cfg) / f"{fid}.zarr", mode="r")
         burn = np.asarray(g["burn_new"]) > 0
         cum = np.cumsum(burn, axis=0) > 0
         for _, r in grp.iterrows():
@@ -134,7 +134,7 @@ def size_matched(cfg: dict, model, device: str, workers: int, amp: bool, ti: int
         rows, _ = predict_split(cfg, model, split, device, workers, amp)
         out[split] = per_fire_csi(pd.DataFrame(rows), ti)
 
-    sizes = fire_sizes()
+    sizes = fire_sizes(cfg)
     val, test = out["val"], out["test"]
     both = pd.concat([
         pd.DataFrame({"csi": val, "split": "val", "size": sizes.reindex(val.index)}),
@@ -258,7 +258,7 @@ def main() -> None:
     print(f"\nper-fire CSI over {len(per)} fires: median {per.median():.4f}, "
           f"IQR {per.quantile(.25):.4f}-{per.quantile(.75):.4f}, mean {per.mean():.4f}")
 
-    sizes = fire_sizes().reindex(per.index)
+    sizes = fire_sizes(cfg).reindex(per.index)
     q = pd.qcut(sizes, 4, labels=["Q1 smallest", "Q2", "Q3", "Q4 largest"], duplicates="drop")
     print("\nby fire size (burned cells):")
     print(f"  {'quartile':<14}{'fires':>6}{'median CSI':>12}{'mean CSI':>10}")

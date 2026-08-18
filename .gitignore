@@ -13,3 +13,5 @@ __pycache__/
 .venv/
 .idea/
 .ipynb_checkpoints/
+data/processed/labels_12h/
+data/processed/labels_12h_manifest.csv
