@@ -1212,6 +1212,100 @@ cannot create signal the model is not using. The next lever is the input, not th
 `burn_mask_mode: incremental` removes the shortcut and forces the physical channels to carry
 weight.
 
+## Incremental burn mask: the shortcut was not the binding constraint
+
+```bash
+python train.py --config configs/incremental.yaml --model unet --hidden-dims 112,224,448 --seed 0
+python -m pipeline.viz_predict sensitivity --config configs/incremental.yaml --mode permute     --checkpoint checkpoints/inc_s0/best.pt --model unet --hidden-dims 112,224,448
+```
+
+If the cumulative mask is what lets the model coast on geometry, giving each step only that
+window's NEW burn should force the physical channels to carry weight. Single-variable against
+baseline, verified by diffing every leaf key of both YAMLs; three seeds.
+
+Validation CSI 0.2411 / 0.2397 / 0.2409, mean **0.2406** against the baseline's **0.2604**. The
+within-arm spread is 0.0014, so the -0.0198 gap is ~14x the noise: clearly worse.
+
+**The criterion was the occlusion profile, not CSI** — set before running, because CSI could move
+either way. Three-seed mean CSI lost to permutation:
+
+| group permuted | incremental | baseline (cumulative) |
+|---|---|---|
+| **burn mask** | **+0.1070** | +0.1310 |
+| moisture (RH, Fosberg) | +0.0026 | +0.0049 |
+| **wind (u/v, all lags)** | **+0.0011** | +0.0051 |
+| terrain | -0.0002 | +0.0066 |
+| temperature | -0.0011 | +0.0020 |
+| canopy (CC, CH) | -0.0034 | +0.0125 |
+
+Subset CSI 0.1478 -> 0.1230. The burn mask still accounts for **87.0%** of skill against 88.6%
+before — unchanged. Wind's contribution *fell* 5x, and terrain, temperature and canopy went
+negative, i.e. indistinguishable from noise.
+
+**Verdict: the input representation of the mask was not the binding constraint.** The model did
+not redirect toward physics; it got a worse mask and dilated that instead. A prediction recorded
+before the run — that CSI might *rise*, since a cumulative mask's interior is dead fire while the
+most recent incremental ring is the active front — was wrong on both validation and test.
+
+## Where the skill lives: the loss is concentrating it on the near ring
+
+Test pixels binned by distance to the nearest currently-burned cell (1 cell = 100 m):
+
+| distance | base rate | CSI | POD | % of all growth |
+|---|---|---|---|---|
+| 1-2 (0.2 km) | 14.58% | 0.2999 | 0.781 | 30.6% |
+| 2-3 (0.3 km) | 10.87% | 0.2546 | 0.655 | 19.4% |
+| 3-5 (0.5 km) | 6.92% | 0.1822 | 0.465 | 16.4% |
+| 5-8 (0.8 km) | 3.35% | 0.1122 | 0.233 | 14.2% |
+| 8-12 (1.2 km) | 1.48% | 0.0406 | 0.067 | 7.5% |
+| **12-20 (2 km)** | 0.63% | **0.0020** | **0.002** | 7.0% |
+| **20-32 (3.2 km)** | 0.18% | **0.0000** | 0.000 | 3.4% |
+| **32+** | 0.006% | **0.0000** | 0.000 | 1.6% |
+
+**Beyond 1.2 km the model is blind (POD 0.002) and 12% of all real growth is out there** — the
+operationally actionable fraction, since a 100 m ring tells a fire manager nothing they cannot see.
+
+The base rate collapses 2,400x across these bands, which explains why a naive "weight pixels by
+distance" would backfire: it would mostly upweight far NEGATIVES, 99.99% of the far field, pushing
+far predictions harder toward zero.
+
+The real finding is that a single global `pos_weight` of ~103 is itself part of the problem. The
+value each band needs is `(1-p)/p`:
+
+| band | needed | applied | effect |
+|---|---|---|---|
+| 1-2 | 5.9 | 103 | positives over-weighted **17x** |
+| 3-5 | 13.5 | 103 | over-weighted 7.6x |
+| 8-12 | 66.6 | 103 | about right |
+| 12-20 | 157 | 103 | under-weighted |
+| 20-32 | 551 | 103 | under-weighted 5.4x |
+
+So the loss instructs the model to pile mass on the near ring and ignore the far field. The
+dilation behaviour is not only an input shortcut — it is partly the class balancing. Per-band
+rebalancing is the principled fix: far positives count more because they are rarer, without
+amplifying far negatives. Two guardrails: cap the outer weight (the 32+ band implies ~16,700, and
+far positives are disproportionately spotting, separate ignitions and merge artifacts — the
+noisiest labels in the set, flagged in Phase 8), and define a distance-stratified CSI *before*
+training, since this will likely lower pooled CSI by design. The `reg_aug` episode is the warning:
+the wrong metric made a broken model look like the best run in the project.
+
+### Does the data even support wind-driven prediction?
+
+Precondition check before any of this, on 469 training samples — angle between the growth-centroid
+vector and the tile-mean wind vector:
+
+| | share |
+|---|---|
+| downwind (0-45 deg) | 34.5% |
+| cross (45-135 deg) | 44.7% |
+| upwind (135-180 deg) | 20.7% |
+
+Mean cos **+0.166**. Weak, but real — and the validation is that it strengthens with wind speed:
+mean cos by wind quartile is **+0.027 / +0.157 / +0.309 / +0.171**. A sign error, a grid-relative
+vs earth-relative mix-up, or a time misalignment would not produce a clean rise from calm to
+strong. **The HRRR ingest is correct and the labels do respond to wind.** But the ceiling is low:
+the model's 0.005 CSI from wind is an underuse of what is there, not a missing 0.2.
+
 ## Storage budget — do NOT materialise samples
 
 Measured on this machine: **83 GB free of 475 GB.** That is the binding constraint on the whole
