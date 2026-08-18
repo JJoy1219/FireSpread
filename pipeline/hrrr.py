@@ -579,7 +579,15 @@ def download_all(fire_ids: list[str], cfg: dict, overwrite: bool = False,
         b = fire_window_bounds(fid, float(cfg["storage"]["hrrr_window_margin_cells"]) * 3.0, cfg)
         _sync_store(g, stamps, b, overwrite)
         groups[fid], bounds[fid] = g, b
-        pos[fid] = {s: i for i, s in enumerate(stamps)}
+        # Positions MUST come from the store's own `times`, not from `stamps`.
+        # `_sync_store` returns a union of the needed hours and everything already
+        # fetched, so whenever the store holds hours this run does not need — which is
+        # the normal case once a second window length has been fetched into it — the
+        # union is longer and differently ordered than `stamps`. Indexing `filled` and
+        # `data` with needed-set positions then reads and writes the WRONG ROW: hours
+        # silently land under another hour's timestamp. That is not a hole a `filled`
+        # check can catch, which is why it went unnoticed.
+        pos[fid] = {s: i for i, s in enumerate(g.attrs["times"])}
 
     missing_hours: list[str] = []
     ok = bytes_total = 0
@@ -608,9 +616,20 @@ def download_all(fire_ids: list[str], cfg: dict, overwrite: bool = False,
                                              overwrite=True)[:] = lat
             arr = extract_window(grib, *slices[fid], field=field)
             g = groups[fid]
-            if "data" not in g or g["data"].shape[0] != len(per_fire[fid]):
-                g.create_array("data", shape=(len(per_fire[fid]), *arr.shape), dtype="float32",
+            # Size from the store's `times`, for the same reason as `pos` above.
+            # Sizing from `per_fire[fid]` left `data` shorter than `times`/`filled`,
+            # which surfaced later as a BoundsCheckError inside a training run.
+            # Creating it here is also a fallback only: `_sync_store` already allocates
+            # `data` at the union length, and re-creating mid-loop with overwrite=True
+            # would wipe every hour written earlier in this run.
+            n_hours = len(g.attrs["times"])
+            if "data" not in g:
+                g.create_array("data", shape=(n_hours, *arr.shape), dtype="float32",
                                chunks=(1, len(CHANNELS), *arr.shape[1:]), overwrite=True)
+            elif g["data"].shape[0] != n_hours:
+                raise RuntimeError(
+                    f"{fid}: data has {g['data'].shape[0]} rows but times has {n_hours}; "
+                    "the store is inconsistent — refetch this fire with --overwrite")
             g["data"][pos[fid][stamp]] = arr
             g["filled"][pos[fid][stamp]] = True
         ok += 1
