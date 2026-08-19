@@ -384,6 +384,17 @@ def _sync_store(grp, stamps: list[str], bounds: tuple, overwrite: bool = False) 
         grp.create_array("data", shape=buf.shape, dtype="float32",
                          chunks=(1, *old.shape[1:]), overwrite=True)[:] = buf
 
+    # `data` must track `times` on EVERY path, not just the carry-over one above.
+    # It previously did not: `times` and `filled` are rewritten unconditionally below,
+    # while `data` was only rebuilt inside the `not overwrite` branch. So an --overwrite
+    # run reset times/filled to the needed set and left `data` at its old length,
+    # misaligning every store it touched. Rebuilding zeroed here is correct for that
+    # path, since overwrite means "discard what is stored and refetch".
+    if "data" in grp and grp["data"].shape[0] != len(stamps):
+        tail = grp["data"].shape[1:]
+        grp.create_array("data", shape=(len(stamps), *tail), dtype="float32",
+                         chunks=(1, *tail), overwrite=True)
+
     grp.create_array("filled", shape=(len(stamps),), dtype="bool",
                      overwrite=True)[:] = new_filled
     grp.attrs["times"] = stamps
