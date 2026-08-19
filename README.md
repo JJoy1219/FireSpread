@@ -1306,6 +1306,74 @@ vs earth-relative mix-up, or a time misalignment would not produce a clean rise 
 strong. **The HRRR ingest is correct and the labels do respond to wind.** But the ceiling is low:
 the model's 0.005 CSI from wind is an underuse of what is there, not a missing 0.2.
 
+## The HRRR store incident, and the two bugs it exposed
+
+Topping the shared weather store up for a second window length corrupted it three
+times. Worth recording in full, because the failures were quiet ones and the checks
+that passed were the wrong checks.
+
+**Two latent bugs, both silent.** The batched `--all` fetch built row positions from the
+NEEDED hour set while `_sync_store` stores a UNION of needed plus already-fetched, so
+whenever a store held hours the current run did not need, the loop read `filled` and wrote
+`data` at the wrong row -- hours landing under another hour's timestamp. Separately,
+`_sync_store` rewrote `times` and `filled` unconditionally but rebuilt `data` only inside
+its `not overwrite` branch, so any `--overwrite` run left `data` at its old length and
+misaligned every store it touched. Both had been dormant for the whole project because
+with one window length the union equals the needed set.
+
+**A third failure that was not a bug.** `_sync_store`'s union keeps only hours that are
+FILLED:
+
+    already = {s for s, f in zip(times, filled) if f}
+
+so syncing with a different needed-set rewrites `times` to `(that set | filled)` and drops
+the other scheme's present-but-unfilled hours -- including archive-hole placeholders whose
++/-1 h neighbours make bridging work. **One store cannot serve two window lengths.**
+`configs/h12.yaml` now has its own `hrrr_windows`. Sharing it was an optimisation to avoid
+re-fetching, and it cost three rounds of damage and ~46 GB against the ~12 GB it saved.
+
+### Verify the property the code depends on, not the one that is easy to read
+
+The check that let the first corruption through compared the `times` attribute before and
+after, found nothing missing, and passed. But `times` is only the index. `_hour_field`
+gates on `filled[i]`, and reads `data[i]`:
+
+    i = pos.get(f"{t:%Y%m%d_%H}z")
+    if i is not None and filled[i]:
+
+An hour can be listed and still be a hole, or listed, filled, and hold another hour's
+weather. Two tools now exist because one check cannot cover both:
+
+| tool | answers |
+|---|---|
+| `analysis/verify_hrrr.py` | do `times`/`filled`/`data` agree in length, and is every needed hour present AND filled |
+| `analysis/spotcheck_hrrr.py` | re-downloads hours and compares content: does row *i* actually hold hour *i* |
+
+Only the second can see displaced rows, and it is what found them. Structural verification
+called those fires healthy.
+
+**Detection power matters when sampling.** At 2 hours per fire, a fire with fraction `f` of
+its rows displaced is caught with probability `1-(1-f)^2` -- 28% at f=0.15. An early sweep
+found 116 affected fires and I nearly used that list for a targeted repair; the implied true
+prevalence ranged from 21% to 72% depending on `f`, so the list was a lower bound and the
+full rebuild was the honest answer.
+
+### Final state
+
+| stage | displaced hours sampled | fires affected |
+|---|---|---|
+| before rebuild | 176 / 1,151 (15.3%) | 116 |
+| after full `--overwrite` rebuild + targeted repair | 3 / 1,243 (0.24%) | 2 |
+| **after repairing those two, 5 hours/fire** | **0 / 3,110** | **0** |
+
+Structure: 0 misaligned, 0 absent, 687 hollow. The hollow count is correct and permanent --
+153 hours are absent from the HRRR archive itself, and `_hour_field` bridges them from
+neighbours by design. 7,064 of 7,065 samples produce weather; the one unbridgeable sample
+was pruned, leaving train 4,501 with val 1,956 and test 607 unchanged, so every previously
+reported val/test number stays comparable.
+
+`--fires-file` was added so a damaged subset can be repaired without a 33 GB rebuild.
+
 ## Storage budget — do NOT materialise samples
 
 Measured on this machine: **83 GB free of 475 GB.** That is the binding constraint on the whole
