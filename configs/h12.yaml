@@ -3,15 +3,23 @@
 paths:
   raw_firms: data/raw/firms
   raw_hrrr: data/raw/hrrr          # scratch only — GRIBs are deleted after windowing
-  hrrr_windows: data/processed/hrrr
+  hrrr_windows: data/processed/hrrr_12h
   raw_landfire: data/raw/landfire
   raw_dem: data/raw/dem
-  # 12 h arm. Every artefact below is window-length dependent and MUST be
-  # separate, or the 24 h results stop being reproducible. `hrrr_windows` is
-  # deliberately shared: the store's pinned window_slice is spatial, and the fire
-  # grid comes from the event bounding box, so 12 h and 24 h see the same cells.
-  # Only extra ANALYSIS HOURS are needed, and _sync_store unions rather than
-  # replaces, so fetching them leaves the 24 h hours intact.
+  # 12 h arm. Every artefact below is window-length dependent and MUST be separate,
+  # or the 24 h results stop being reproducible.
+  #
+  # `hrrr_windows` is separate too, which an earlier version of this config got
+  # wrong. Sharing the store looks safe -- the pinned window_slice is spatial and
+  # both schemes see the same cells -- and it avoids re-fetching. It is not safe.
+  # _sync_store's union keeps only hours that are FILLED:
+  #     already = {s for s, f in zip(times, filled) if f}
+  # so syncing with a different needed-set rewrites `times` to (that set | filled)
+  # and silently drops the OTHER scheme's hours that are present but unfilled --
+  # including the archive-hole placeholders whose neighbours make bridging work.
+  # Two top-up attempts each corrupted the 24 h store this way, the second turning
+  # 0 absent hours into 85. One store per window length; the duplicated download is
+  # far cheaper than the debugging.
   labels: data/processed/labels_12h
   sample_index: data/processed/sample_index_12h.parquet
   samples: data/processed/samples

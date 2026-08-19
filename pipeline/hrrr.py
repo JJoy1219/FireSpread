@@ -709,6 +709,9 @@ def main() -> None:
     p.add_argument("--fire-id", help="single fire to fetch")
     p.add_argument("--all-mvp", action="store_true", help="fetch the 5 MVP events")
     p.add_argument("--all", action="store_true", help="every kept fire, deduped by hour")
+    p.add_argument("--fires-file",
+                   help="newline-separated fire ids; repair a subset without "
+                        "refetching every fire")
     p.add_argument("--list-fires", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="report hours needed, fetch nothing")
     p.add_argument("--limit", type=int, help="stop after N hours per fire (smoke test)")
@@ -716,6 +719,19 @@ def main() -> None:
     args = p.parse_args()
 
     cfg = load_config(args.config)
+
+    if args.fires_file:
+        # Targeted repair. Damage from a bad sync is usually confined to a subset, and
+        # a full --overwrite rebuild costs ~33 GB to fix what may be 180 fires. The
+        # fire list comes from analysis/verify_hrrr.py, which reports per fire.
+        ids = [ln.strip() for ln in
+               (ROOT / args.fires_file).read_text().splitlines() if ln.strip()]
+        print(f"repairing {len(ids)} fires from {args.fires_file}")
+        r = download_all(ids, cfg, args.overwrite, args.dry_run)
+        print(f"\n{r.get('unique_hours', 0):,} unique hours, "
+              f"{r.get('gb', 0)} GB" if args.dry_run else
+              f"\nrepaired {len(ids)} fires")
+        return
 
     if args.all:
         ev = pd.read_csv(ROOT / args.events)
