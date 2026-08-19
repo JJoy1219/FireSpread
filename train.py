@@ -356,7 +356,14 @@ def train(cfg: dict, args) -> None:
         sel_name = str(tc.get("select_metric", "csi"))
         if sel_name == "far_csi" and not bands:
             raise SystemExit("select_metric far_csi needs train.band_pos_weight: true")
-        far_csi = bands[best["threshold"]].far_csi() if bands else float("nan")
+        # Evaluate far CSI at the threshold that MAXIMISES it, not at the pooled-best
+        # one. The two differ a lot -- the pooled optimum is set by the near ring and
+        # runs high, and reading far CSI there understates it badly: the baseline scores
+        # 0.0514 at its pooled-best 0.95 against 0.0863 at 0.85. Selecting on a metric
+        # while measuring it at another objective's operating point is the same error
+        # as the 0.7-capped threshold sweep that once inverted the epoch ranking.
+        far_thr = max(THRESHOLDS, key=lambda t: bands[t].far_csi()) if bands else None
+        far_csi = bands[far_thr].far_csi() if bands else float("nan")
         sel = far_csi if sel_name == "far_csi" else best["csi"]
 
         secs = time.perf_counter() - t0
@@ -365,7 +372,8 @@ def train(cfg: dict, args) -> None:
             print("  CSI by distance: " + "  ".join(
                 f"{BAND_LABELS[b].split()[0]} {bc[b]:.3f}"
                 for b in range(N_BANDS) if not np.isnan(bc[b])), flush=True)
-            print(f"  far CSI (>= 1.2 km) {far_csi:.4f}   pooled {best['csi']:.4f}", flush=True)
+            print(f"  far CSI (>= 1.2 km) {far_csi:.4f} @thr {far_thr}   "
+                  f"pooled {best['csi']:.4f} @thr {best['threshold']}", flush=True)
         print(f"epoch {epoch}: train {running/max(seen,1):.4f}  val {val_loss:.4f}  "
               f"CSI {best['csi']:.4f} @thr {best['threshold']}  "
               f"(CSI@0.5 {at_half['csi']:.4f})  FAR {best['far']:.3f}  POD {best['pod']:.3f}  "
@@ -386,6 +394,7 @@ def train(cfg: dict, args) -> None:
             state["best_csi"] = best_csi
             state["select_metric"] = sel_name
             state["far_csi"] = far_csi
+            state["far_threshold"] = far_thr
             state["pooled_csi"] = best["csi"]
             torch.save(state, ckpt_dir / "best.pt")
             print(f"  new best {sel_name} {best_csi:.4f} -> {ckpt_dir/'best.pt'}")
