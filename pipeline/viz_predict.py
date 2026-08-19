@@ -320,6 +320,11 @@ def main() -> None:
     p.add_argument("--split", default="test")
     p.add_argument("--fire-id", default="2022_3298")
     p.add_argument("--n", type=int, default=4)
+    # The occlusion CSI drops are read at ONE operating point, and the checkpoint stores
+    # the pooled-CSI optimum (0.95 for baseline), which is set by the near ring. The same
+    # baseline scores far CSI 0.0514 at 0.95 against 0.0863 at 0.85, so the attribution
+    # is not obviously threshold-robust and needs to be checkable at another point.
+    p.add_argument("--threshold", type=float, help="override the checkpoint threshold")
     p.add_argument("--mode", choices=["zero", "permute"], default="zero",
                    help="sensitivity: mean-impute or shuffle across the batch")
     p.add_argument("--device", default=None, help="cuda | cpu (default: cuda if free)")
@@ -334,6 +339,8 @@ def main() -> None:
     device = a.device or ("cuda" if torch.cuda.is_available()
                           and torch.cuda.mem_get_info()[0] / 2**30 > 4 else "cpu")
     model, thr, st = load_model(cfg, a.model, a.checkpoint, device)
+    if a.threshold is not None:
+        thr = float(a.threshold)
     ds = WildfireDataset(cfg, a.split, augment=False)
     print(f"{a.checkpoint}  epoch {st.get('epoch')}  threshold {thr}  device {device}")
     print(f"{a.split}: {len(ds)} samples over {ds.index.fire_id.nunique()} fires")
