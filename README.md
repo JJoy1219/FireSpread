@@ -1306,6 +1306,53 @@ vs earth-relative mix-up, or a time misalignment would not produce a clean rise 
 strong. **The HRRR ingest is correct and the labels do respond to wind.** But the ceiling is low:
 the model's 0.005 CSI from wind is an underuse of what is there, not a missing 0.2.
 
+## AUC-PR, and what the published numbers are actually measuring
+
+```bash
+python -m analysis.auc_pr --checkpoint checkpoints/unet_wide/best.pt --split test
+```
+
+Benchmarks report AUC-PR rather than CSI, so this puts a comparable number next to them.
+Computed both ways on the test split, because the target definition dominates the result:
+
+| target | AP | base rate | lift over random | share of max lift |
+|---|---|---|---|---|
+| **new burn (this project)** | **0.2423** | 0.281% | 86.3x | 24.2% |
+| cumulative mask (Huot-style) | 0.9860 | 3.706% | 26.6x | **98.6%** |
+
+Per fire, median AP 0.1739 and mean 0.1954 over 113 fires; pooled AP flatters exactly as
+pooled CSI does.
+
+**0.2423 sits in the range of published results** (Huot et al. UNet 0.2739, Swin-UNet 0.2803)
+while predicting a target 13x sparser, since ours excludes already-burned cells and theirs
+does not.
+
+The second row is the more useful measurement. Scored the way the benchmarks score, this same
+model reaches 0.9860, which is 98.6% of the theoretical maximum for that base rate: the
+cumulative-mask target is very nearly saturated by copying the input forward. Max achievable
+lift is 1/base_rate, so on the strict target we capture 24.2% of what is available and on the
+cumulative target essentially all of it. That quantifies the caveat recorded above, that a
+published AUC-PR on cumulative masks is substantially the trivially-correct interior.
+
+Not a controlled comparison: different regions, years, fire selection, and 1 km against our
+100 m. It shows our numbers are in a plausible range for the field, not that this model beats
+theirs, which would require running it on their dataset.
+
+### The literature agrees about the fire mask
+
+The finding that the burn mask carries most of the skill is not specific to this project.
+Huot et al. ablate one feature at a time and report similar performance across every ablation
+except removal of the fire mask, which drops sharply; adding single features alongside the
+mask, elevation and vegetation index perform best. A later interpretability study on the same
+dataset ranks the previous fire mask top-3 by SHAP for both UNet and Swin-UNet, and concludes
+that models prioritise spatial-temporal continuity over meteorological variables.
+
+That ordering matches the occlusion result here, where canopy and terrain beat wind. It holds
+at 1 km (Huot), 375 m (WildfireSpreadTS) and 100 m (this project), so it is not an artefact of
+resolution, and a transformer buys 2% relative AUC-PR for ~48x the FLOPs, matching the
+ConvLSTM null here. What this project adds is the share quantified by permutation occlusion
+with threshold robustness, and the sub-daily test with day/night stratification.
+
 ## The HRRR store incident, and the two bugs it exposed
 
 Topping the shared weather store up for a second window length corrupted it three
