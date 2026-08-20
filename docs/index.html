@@ -296,6 +296,46 @@ code { font-family: var(--mono); font-size: .88em; background: var(--surface-2);
     cases the model handles worst.
   </p>
 
+  <h2>Measured the way the field measures</h2>
+  <p>
+    Published benchmarks report average precision, the area under the precision and recall curve,
+    rather than CSI. Average precision has to be read against the positive base rate, because that
+    rate is the score a random guess would earn. The useful quantity is the lift above it.
+  </p>
+  <p>
+    The comparison also depends entirely on how the target is defined, so both definitions are
+    computed here on the same model and the same test fires.
+  </p>
+
+  <div class="scroll"><table>
+    <tr><th>Target definition</th><th class="num">AP</th><th class="num">Base rate</th><th class="num">Lift</th><th class="num">Share of max lift</th></tr>
+    <tr><td><strong>New growth only, used here</strong></td><td class="num"><strong>0.242</strong></td><td class="num">0.281%</td><td class="num">86.3x</td><td class="num">24.2%</td></tr>
+    <tr><td>Whole fire mask, used by benchmarks</td><td class="num">0.986</td><td class="num">3.706%</td><td class="num">26.6x</td><td class="num"><strong>98.6%</strong></td></tr>
+  </table></div>
+
+  <p>
+    The top row is in the range of published results, which report 0.274 for a U-Net and 0.280 for a
+    transformer, while predicting a target roughly 13 times sparser. This project excludes cells that
+    have already burned from the target. The benchmarks include them.
+  </p>
+  <p>
+    <strong>The second row is the more useful measurement.</strong> Scored the way the benchmarks
+    score, this same model reaches 0.986, which is 98.6 percent of the highest score attainable at
+    that base rate. Predicting the whole fire mask is very nearly solved by copying the input forward,
+    because every cell that is already alight is both given in the input and counted in the answer.
+  </p>
+  <p>
+    The final column makes the difference concrete. The largest lift any model can achieve is one
+    divided by the base rate. On the strict target this model captures under a quarter of what is
+    available, so there is real headroom. On the benchmark target there is almost none left to win.
+  </p>
+  <p class="note">
+    This is not a controlled comparison. Different regions, years, fire selection, and a grid ten times
+    coarser than the one used here. It shows these numbers are plausible for the field, not that this
+    model is better. Per fire, the median average precision is 0.174 against the pooled 0.242, the same
+    gap that appears in CSI.
+  </p>
+
   <h2>The result that reframed the project</h2>
   <p>
     Predictions look like near symmetric haloes around the current perimeter rather than wind driven
@@ -329,6 +369,22 @@ code { font-family: var(--mono); font-size: .88em; background: var(--surface-2);
     not learning fire physics. That explains several earlier observations at once: why the recurrent
     layers bought nothing, why weather side changes did not help, and why skill scales with fire size,
     since larger fires offer more perimeter geometry to work with.
+  </p>
+
+  <h3>Other groups find the same thing</h3>
+  <p>
+    This is not specific to one pipeline. The most cited benchmark in the area removes one input at a
+    time and reports that performance barely moves, except when the previous fire mask is removed, at
+    which point it drops sharply. Adding single inputs back alongside the mask, elevation and a
+    vegetation index help most. A later study using attribution methods on the same data ranks the
+    previous fire mask among the top three inputs for both a U-Net and a transformer, and concludes
+    that these models lean on spatial continuity rather than on the weather.
+  </p>
+  <p>
+    That ordering matches the table above, where vegetation structure and terrain both beat wind. It
+    holds at grid sizes of 1 kilometre, 375 metres and the 100 metres used here, so it is not an
+    artefact of resolution, and swapping in a transformer buys about 2 percent relative improvement
+    for roughly 48 times the computation, which mirrors the recurrence result below.
   </p>
 
   <h2>What we tried</h2>
