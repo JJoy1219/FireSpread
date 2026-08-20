@@ -3,7 +3,7 @@
 Standard formulation from Shi et al. 2015 — the gates are a single convolution over
 `[x, h]`, 3x3 with same padding, so the recurrence stays spatially local.
 
-CLAUDE.md specifies layer norm on the hidden state rather than batch norm, which is the
+DESIGN.md specifies layer norm on the hidden state rather than batch norm, which is the
 right call for sequences: batch statistics over a 3-step sequence with a batch of 16 are
 noisy, and they leak across samples in a way that is awkward at inference. Implemented as
 `GroupNorm(1, C)`, which normalises over (C, H, W) per sample — identical to LayerNorm but

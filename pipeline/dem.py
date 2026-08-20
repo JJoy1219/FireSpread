@@ -1,12 +1,12 @@
 """DEM ingestion (Phase 1.4).
 
 Source is USGS 3DEP 1/3 arc-second (~10 m) on AWS Open Data — public, no credentials,
-and the "3DEP tiles" option named in the CLAUDE.md data tree. Tiles are Cloud Optimized
+and the "3DEP tiles" option named in the DESIGN.md data tree. Tiles are Cloud Optimized
 GeoTIFFs, so `/vsicurl/` windowed reads pull only the bytes covering a fire instead of
 the whole 468 MB tile. Statewide at 10 m would be ~25 GB; per-fire clips are a few tens
 of MB each.
 
-Elevation is stored raw (native EPSG:4269, native resolution) per CLAUDE.md Phase 1.4 —
+Elevation is stored raw (native EPSG:4269, native resolution) per DESIGN.md Phase 1.4 —
 slope, aspect and TPI are derived later in the feature pipeline, not stored here.
 
     python -m pipeline.dem --all-mvp

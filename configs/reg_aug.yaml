@@ -1,5 +1,5 @@
 # REGULARISATION VARIANT: reg_aug. See the README regularisation section.
-# Baseline config — Phase 6 values from CLAUDE.md, plus Phase 1-3 pipeline params.
+# Baseline config — Phase 6 values from DESIGN.md, plus Phase 1-3 pipeline params.
 
 paths:
   raw_firms: data/raw/firms
@@ -60,7 +60,7 @@ events:
   link_distance_km: 2.0      # ~5 VIIRS pixels at 375 m
   link_time_hours: 96        # a fire can go quiet for up to 4 days between detections
   min_detections: 25         # discard specks; roughly >= ~3 km^2 cumulative
-  # CLAUDE.md Phase 2 says discard fires with < 3 timesteps, but that is one short of
+  # DESIGN.md Phase 2 says discard fires with < 3 timesteps, but that is one short of
   # what the model can actually use: a sample needs `model.t_steps` windows of history
   # AND a target window, so 4 usable windows is the true floor. Measured over the full
   # archive: of 105 fires with exactly 3 usable windows, 5 yielded any sample at all.
@@ -117,7 +117,7 @@ sampling:
     noise_std: 0.05
     channel_dropout: 0.1
 
-  # Chronological, but NOT the 2015-2019 / 2020-2021 / 2022-2023 boundary in CLAUDE.md
+  # Chronological, but NOT the 2015-2019 / 2020-2021 / 2022-2023 boundary in DESIGN.md
   # Phase 7. Measured on the built dataset, that split put 69.7% of samples in validation
   # against 21.7% in training: 2020 and 2021 are the two most extreme seasons on record,
   # tiling multiplies each megafire into many tiles, and train additionally lost the most
@@ -159,7 +159,7 @@ model:
   # Dataset's flip augmentation all key off this list by index, so it must not be
   # reordered without recomputing norm stats.
   #
-  # CLAUDE.md Phase 3 declares C=12, but its own channel table lists 14 rows and
+  # DESIGN.md Phase 3 declares C=12, but its own channel table lists 14 rows and
   # omits cc, tpi, elevation and Fosberg -- all of which the pipeline builds or the
   # "Derived Features" section requires. The real count is 17 continuous plus fuel.
   #

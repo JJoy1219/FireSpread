@@ -1,4 +1,4 @@
-"""Visualisation helpers. Not in the CLAUDE.md tree, but the stack lists matplotlib
+"""Visualisation helpers. Not in the DESIGN.md tree, but the stack lists matplotlib
 for exactly this and the pipeline needs eyeballing at every stage.
 
     python -m pipeline.viz spread --fire-id 2018_4037

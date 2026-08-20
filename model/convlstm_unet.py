@@ -6,7 +6,7 @@
         -> U-Net decoder, transposed-conv upsample + skip concat
         -> 1x1 conv -> per-pixel logit
 
-**Returns logits, not probabilities.** CLAUDE.md specifies a sigmoid on the final layer,
+**Returns logits, not probabilities.** DESIGN.md specifies a sigmoid on the final layer,
 but the loss is BCE weighted by a class-imbalance ratio that reaches ~9,400 at the median
 sample. `sigmoid` followed by `BCELoss` computes `log(p)` on a saturated probability and
 loses the gradient in float16; `BCEWithLogitsLoss` folds the two together with the

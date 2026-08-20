@@ -23,7 +23,7 @@ Build an ML model that predicts wildfire burn perimeter expansion over 6-24 hour
 
 ```
 wildfire/
-├── CLAUDE.md
+├── DESIGN.md
 ├── data/
 │   ├── raw/
 │   │   ├── firms/         # FIRMS CSV/shapefiles

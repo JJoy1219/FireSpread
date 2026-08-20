@@ -54,7 +54,7 @@ def rasterize_window(x: np.ndarray, y: np.ndarray, transform: Affine,
                      closing_px: int = 0) -> np.ndarray:
     """Points -> binary raster: footprint dilation, then gap-closing.
 
-    Two separate jobs, which CLAUDE.md conflates into one dilation:
+    Two separate jobs, which DESIGN.md conflates into one dilation:
 
     1. `dilation_px` restores the VIIRS footprint. A detection is a 375 m pixel, not a
        point, and rasterising it onto a 100 m grid marks a single cell.

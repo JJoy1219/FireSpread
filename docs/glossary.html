@@ -236,7 +236,7 @@
     illumination, and it is the reason coverage is not continuous but arrives in fixed daily slots.
     <div class="here gotcha"><b>the catch</b>This single fact reshaped the project. All 741,236 detections fall in
     two ~4-hour bands — 08–11Z and 19–22Z, about 11 hours apart. Nothing is ever seen in the other 16 hours,
-    so CLAUDE.md's 6-hour windows were 59.6% empty and we moved to 24.</div></dd>
+    so DESIGN.md's 6-hour windows were 59.6% empty and we moved to 24.</div></dd>
 
     <dt>Overpass &middot; revisit</dt>
     <dd>An <em>overpass</em> is one transit of the satellite over a location; the <em>revisit interval</em> is
@@ -256,7 +256,7 @@
     <dt>Confidence <span class="alt">low / nominal / high</span></dt>
     <dd>VIIRS's own categorical quality flag. Low-confidence detections include sun glint, hot bare soil and
     industrial heat.
-    <div class="here"><b>in this project</b>Filtered to nominal and above, per CLAUDE.md.</div></dd>
+    <div class="here"><b>in this project</b>Filtered to nominal and above, per DESIGN.md.</div></dd>
 
     <dt>Detection type</dt>
     <dd>A classification field: 0 vegetation fire, 1 volcano, 2 other static land source, 3 offshore.
@@ -538,7 +538,7 @@
     <dd>Three responses to imbalance. <em>Weighted BCE</em> multiplies the positive class's loss.
     <em>Focal loss</em> down-weights already-easy examples so training concentrates on hard ones.
     <em>Dice</em> optimises overlap directly but is insensitive to small fires — which are the hard and
-    operationally important cases — so CLAUDE.md rules it out as a sole objective.</dd>
+    operationally important cases — so DESIGN.md rules it out as a sole objective.</dd>
   </dl>
 </section>
 
@@ -583,7 +583,7 @@
     are processed together. <em>Gradient accumulation</em> sums gradients over several small batches before
     stepping, giving a large batch's statistics at a small batch's memory cost.
     <div class="here"><b>in this project</b>Measured 0.602&nbsp;GB per sample at 256&nbsp;px: batch 11 fits in
-    8&nbsp;GB, not the 16 CLAUDE.md specifies.</div></dd>
+    8&nbsp;GB, not the 16 DESIGN.md specifies.</div></dd>
 
     <dt>AMP <span class="alt">automatic mixed precision</span></dt>
     <dd>Running most operations in 16-bit while keeping a 32-bit master copy of the weights. Roughly halves
@@ -637,7 +637,7 @@
     such windows; only targets are restricted.</dd>
 
     <dt>Dilation vs closing</dt>
-    <dd>Two operations CLAUDE.md merges into one. <em>Dilation</em> grows each detection to approximate the
+    <dd>Two operations DESIGN.md merges into one. <em>Dilation</em> grows each detection to approximate the
     375&nbsp;m VIIRS footprint. <em>Closing</em> — dilate then erode — bridges gaps <em>between</em>
     detections without pushing the outer boundary outward.
     <div class="here"><b>in this project</b>Dilation alone left the Camp mask in 274 disconnected pieces. With
@@ -656,7 +656,7 @@
 </section>
 
 <footer>
-  FireSpread &middot; companion to <code>CLAUDE.md</code> and <code>README.md</code>. Figures in
+  FireSpread &middot; companion to <code>DESIGN.md</code> and <code>README.md</code>. Figures in
   <code>figures/</code>; decisions and their measured justifications in the README.
 </footer>
 

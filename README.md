@@ -1,7 +1,42 @@
 # FireSpread
 
-Wildfire perimeter-spread prediction for California, 2015-2023. See [CLAUDE.md](CLAUDE.md)
-for the full design; this file covers setup and current status.
+Predicting where a wildfire's perimeter will grow next, from satellite fire detections, hourly
+weather, fuel maps and terrain. California, 2015-2023, on a 100 m grid.
+
+**[Interactive results and write-up](https://jjoy1219.github.io/FireSpread/)**
+
+## What this found
+
+A ConvLSTM U-Net and a matched U-Net were trained on 622 fires with fire-level chronological
+splits. On held-out 2022-2023 fires the model reaches **CSI 0.185 pooled, 0.099 per fire**, and
+**average precision 0.242**, against 0.274-0.280 reported by published benchmarks on a target
+roughly 13x less sparse than this one.
+
+The more useful result is negative. Permutation occlusion shows the model draws **81-93% of its
+skill from the current burn mask** at every decision threshold, while wind, the dominant physical
+driver of fire spread, costs about 0.005 CSI when destroyed, less than canopy cover does. It has
+learned a well-shaped dilation of the perimeter, not fire behaviour.
+
+Six controlled experiments tried to change that and none did: recurrent layers, three kinds of
+regularisation, incremental burn masks, distance-based class rebalancing, a 12 h forecast horizon,
+and a derived channel supplying the wind-to-perimeter relationship directly. The last is the most
+informative, because it rules out the explanation that the relationship was merely hard to read.
+Published work on three separate datasets at 1 km, 375 m and 100 m reports the same dominance of
+the prior fire mask, so this is a property of the task rather than of this pipeline.
+
+**This is not an operational fire prediction tool.** A per-fire CSI near 0.10 with a false alarm
+ratio of 0.78, and skill that comes overwhelmingly from perimeter geometry, cannot answer the
+question that matters operationally: which direction a fire will run tonight. The comparison
+against FARSITE that this project set out to make has not been run, so that goal is untested
+rather than achieved.
+
+What is here instead is a complete and reproducible pipeline from raw public data to evaluation,
+baselines chosen to be honest rather than flattering, and negative results documented in enough
+detail to save someone else the same experiments.
+
+[DESIGN.md](DESIGN.md) is the original design document, kept as written with its superseded
+decisions annotated in place. This file covers setup, results and the full record of what changed
+and why.
 
 ## Setup
 
@@ -109,7 +144,7 @@ settings over the identical archive.
 
 Per-year event counts track the real severity record: 2020 (104) and 2017 (95) high, 2019 (39)
 low. **But note the detection totals**: the val years hold 387k detections against 31k in test.
-The CLAUDE.md chronological split puts the two most extreme seasons in California history
+The DESIGN.md chronological split puts the two most extreme seasons in California history
 (2020, 2021) in validation and two mild ones (2022, 2023) in test. Model selection will be tuned
 on megafire behaviour and then scored on quiet fires, and headline test CSI will not say much
 about extreme-event performance. Worth revisiting at Phase 7 — the cleanest fix is to keep the
@@ -143,9 +178,9 @@ threshold. Nothing exceeding 1.0x is the useful signal here — over-merged clus
 overshoot. LNU and SCU sit lowest, consistent with the August 2020 smoke inversion and their
 large share of low-intensity grass and oak woodland burning.
 
-## Decisions and deviations from CLAUDE.md
+## Decisions and deviations from DESIGN.md
 
-- **`pipeline/events.py` is a new file** not in the CLAUDE.md tree. Event segmentation is MVP
+- **`pipeline/events.py` is a new file** not in the DESIGN.md tree. Event segmentation is MVP
   checklist item 1 but has no listed home; it is separate from `download.py` because it is
   a transform, not a fetch.
 - **Source is `VIIRS_SNPP_SP`**, not NRT. NRT only covers roughly the last two months; the
@@ -215,7 +250,7 @@ The five MVP fires span years, regions, sizes and all three splits:
 | 2021_3526 | Caldor | 2021-08-15 | 19,456 | val |
 | 2022_3298 | Mosquito | 2022-09-07 | 4,207 | test |
 
-Window is T-12h to T+24h per CLAUDE.md Phase 1.2. **Full dataset construction will need the whole
+Window is T-12h to T+24h per DESIGN.md Phase 1.2. **Full dataset construction will need the whole
 active period instead** — these fires burn for weeks, and Caldor alone runs 1,224 hours.
 
 ### Verified against known meteorology
@@ -265,7 +300,7 @@ CH 0-430 dm). Jobs completed in 10-40 s each.
 Only **LF2016, LF2022, LF2023** (+2024/25) carry FBFM40/CC/CH. LF2014 ships disturbance only and
 LF2020 topography only, so **there is no pre-2016 fuel map at all**.
 
-CLAUDE.md Phase 1.3 says use the version year *closest* to each fire. That is unsafe: LANDFIRE
+DESIGN.md Phase 1.3 says use the version year *closest* to each fire. That is unsafe: LANDFIRE
 rewrites fuels to reflect burn scars, so a version published after a fire encodes that fire's own
 footprint and the model can read the target off its input. The rule must be *latest version
 strictly before ignition*.
@@ -291,7 +326,7 @@ python -m pipeline.dem --all-mvp
 USGS 3DEP 1/3 arc-second (~10 m) from AWS Open Data, no credentials. Tiles are COGs, so
 `/vsicurl/` windowed reads pull only each fire's footprint — 56 MB rather than a 468 MB tile.
 Elevation is stored raw in native EPSG:4269; slope, aspect and TPI are derived later per
-CLAUDE.md.
+DESIGN.md.
 
 **This does not scale as-is.** 1.16 GB for five fires means roughly 160 GB across all 692. For
 full dataset construction, build one statewide 100 m EPSG:5070 DEM (~0.5 GB) and clip from it;
@@ -348,7 +383,7 @@ single exception a genuine multi-day outage during Caldor.
 
 ### Dilation is two jobs, not one
 
-CLAUDE.md prescribes a 1-2 px dilation "to account for detection gaps". That conflates restoring
+DESIGN.md prescribes a 1-2 px dilation "to account for detection gaps". That conflates restoring
 the VIIRS footprint with bridging gaps between detections, and doing only the first leaves a
 stippled perimeter — at `dil=2` the Camp mask broke into **274 components** with a 0.74 fill
 ratio. Adding morphological **closing** (dilate then erode) joins them without pushing the outer
@@ -419,7 +454,7 @@ python -m pipeline.hrrr --all-mvp --dry-run   # hours and GB, fetch nothing
 python -m pipeline.hrrr --all-mvp             # fetch, window, store, delete GRIBs
 ```
 
-`download_event` used to be pinned to CLAUDE.md's T-12h..T+24h, which served under 5% of what
+`download_event` used to be pinned to DESIGN.md's T-12h..T+24h, which served under 5% of what
 24 h windows with `t_steps: 3` require. It now derives its hours from the fire's own label zarr,
 so weather can never span a different period than the targets.
 
@@ -539,10 +574,10 @@ visible only because of the 6 h lag structure — at 24 h sampling it would appe
 becoming 4 mph SW with nothing in between. This validates the temporal indexing and the regrid
 together.
 
-### Channel list — `C=12` in CLAUDE.md does not hold
+### Channel list — `C=12` in DESIGN.md does not hold
 
 Pinned in `model.channels`, which the feature builder, `norm_stats.json` and the Dataset's flip
-augmentation all index into. CLAUDE.md declares `C=12`, but its own table lists 14 rows and omits
+augmentation all index into. DESIGN.md declares `C=12`, but its own table lists 14 rows and omits
 `cc`, `tpi`, `elevation` and Fosberg — all of which the pipeline builds or the "Derived Features"
 section requires. The real count is **17 continuous + fuel**, embedded at 8 dims rather than
 one-hot over 40 (29 classes observed, and the codes are not ordinal).
@@ -641,7 +676,7 @@ between, each layer's final hidden state doubling as that scale's skip connectio
 transposed-conv decoder and a 1x1 head. `UNet` is the 1.90 M baseline with the time axis folded
 into channels.
 
-**Both return logits, not probabilities.** CLAUDE.md specifies a sigmoid on the final layer, but
+**Both return logits, not probabilities.** DESIGN.md specifies a sigmoid on the final layer, but
 `pos_weight` reaches ~9,400 at the median sample, and `sigmoid` then `BCELoss` takes the log of a
 saturated probability and loses the gradient in float16. `BCEWithLogitsLoss` fuses them via
 log-sum-exp and stays stable; `predict()` applies the sigmoid for inference and metrics. The
@@ -750,9 +785,9 @@ The HRRR figure is the one worth noting: **5,850 unique calendar hours served 25
 *and* a target window, so 4 usable windows is the real floor. Of 105 fires with exactly 3,
 five yielded any sample. `sample_index.parquet`, not `keep`, is the authority on what is trainable.
 
-### Split boundary moved off the CLAUDE.md years
+### Split boundary moved off the DESIGN.md years
 
-CLAUDE.md Phase 7 specifies 2015-2019 / 2020-2021 / 2022-2023. Measured on the built dataset that
+DESIGN.md Phase 7 specifies 2015-2019 / 2020-2021 / 2022-2023. Measured on the built dataset that
 is unusable: it puts **69.7% of samples in validation against 21.7% in training**, because 2020 and
 2021 are the two most extreme seasons on record and tiling multiplies each megafire into many
 tiles. Train was hit twice over — it also lost the most to weather gaps (2,253 -> 1,537, -32%),
@@ -854,7 +889,7 @@ threshold is the largest in the sweep.
 
 ### Baselines — persistence is NOT strong here
 
-CLAUDE.md Phase 7 calls persistence "deceptively strong". That is true of a **cumulative** burn
+DESIGN.md Phase 7 calls persistence "deceptively strong". That is true of a **cumulative** burn
 target, where most correct pixels were already burning. Ours is **new burn only**
 (`burn[t+1] & ~cumulative[t]`), so persistence predicts exactly the cells the target excludes.
 Measured over the full validation split:
@@ -988,7 +1023,7 @@ size-stratified metrics are the only ones that compare across splits at all.
 ## Ablation: does the ConvLSTM earn its cost?
 
 ```bash
-python train.py --model unet                                # 1.90 M, CLAUDE.md baseline
+python train.py --model unet                                # 1.90 M, DESIGN.md baseline
 python train.py --model unet --hidden-dims 112,224,448      # 5.76 M, capacity-matched
 ```
 
@@ -997,7 +1032,7 @@ python train.py --model unet --hidden-dims 112,224,448      # 5.76 M, capacity-m
 | model | params | val CSI | test CSI | test Brier | test per-fire median |
 |---|---|---|---|---|---|
 | ConvLSTM U-Net | 5.35 M | **0.2641** | 0.1849 | 0.03179 | 0.0990 |
-| U-Net (CLAUDE.md baseline) | 1.90 M | 0.2626 | 0.1826 | 0.02468 | 0.0963 |
+| U-Net (DESIGN.md baseline) | 1.90 M | 0.2626 | 0.1826 | 0.02468 | 0.0963 |
 | **U-Net, capacity-matched** | 5.76 M | 0.2639 | **0.2003** | **0.01870** | **0.1120** |
 
 On validation all three are within 0.0015 — a 0.6% spread. On **test the plain U-Net wins**: the
@@ -1028,7 +1063,7 @@ signature of the extra capacity being spent on overfitting rather than on tempor
 ### Consequence
 
 **The U-Net is the better model to ship**: equal or better accuracy, markedly better calibration,
-2.8x fewer parameters at the baseline width, and 12% faster per epoch. CLAUDE.md names the
+2.8x fewer parameters at the baseline width, and 12% faster per epoch. DESIGN.md names the
 ConvLSTM U-Net as the target architecture; on this data, at this sequence length, that choice is
 not supported.
 
@@ -1537,7 +1572,7 @@ reported val/test number stays comparable.
 ## Storage budget — do NOT materialise samples
 
 Measured on this machine: **83 GB free of 475 GB.** That is the binding constraint on the whole
-project, and CLAUDE.md Phase 3 as written does not fit inside it.
+project, and DESIGN.md Phase 3 as written does not fit inside it.
 
 Phase 3 says to save patch samples to zarr/HDF5. With tiling that is 26,876 samples of shape
 `(3, 12, 256, 256)`:
@@ -1659,7 +1694,7 @@ data rather than the hardware, so the answer stayed A:
   despite 2.4x fewer samples, because tiles materialise only where fire is (median 1 per window)
   while C pays full 512^2 on every window including the small fires that dominate.
 - **Class imbalance.** Median positive fraction drops from 0.011% (A) to 0.003% (C), pushing
-  implied `pos_weight` from ~9,400 to ~29,100. CLAUDE.md already names imbalance as the loss
+  implied `pos_weight` from ~9,400 to ~29,100. DESIGN.md already names imbalance as the loss
   design driver; C makes the median sample 3.5x emptier.
 
 C's real advantage is context: 51.2 km of upwind terrain and fuel visible to the model versus
@@ -1673,7 +1708,7 @@ train/test.
 
 ## Known issues to revisit
 
-- `batch_size: 16` in the config comes from CLAUDE.md, but measured 9.62 GB against the old 8 GB
+- `batch_size: 16` in the config comes from DESIGN.md, but measured 9.62 GB against the old 8 GB
   card's 6.9 GB free — it spilled to system RAM rather than training at speed. The config's
   **8 + `grad_accum_steps: 2`** was that workaround. **On the 24 GB 3090 this no longer binds:**
   bs16 at 256 fits natively, so the accumulation can be dropped (keep AMP either way).
@@ -1684,5 +1719,5 @@ train/test.
   affordable. It does not change the sample index (still A-tiled), only what the Dataset crops
   around each tile, so it can be deferred to Phase 5 without reworking Phases 3-4.
 - The August Complex (2020) and similar complexes are genuinely multiple ignitions that merged.
-  CLAUDE.md says to treat merges as a single union geometry, which the clustering does by
+  DESIGN.md says to treat merges as a single union geometry, which the clustering does by
   construction — worth confirming that this is still what you want for the largest events.

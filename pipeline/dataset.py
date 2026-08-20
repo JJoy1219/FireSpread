@@ -27,7 +27,7 @@ from pipeline.download import ROOT, label_dir, load_config
 from pipeline.features import WEATHER_CHANNELS, static_tile, weather_tile
 
 # Fallback only; `sampling.split_years` in the config is authoritative. See the note
-# there for why this is not the CLAUDE.md Phase 7 boundary.
+# there for why this is not the DESIGN.md Phase 7 boundary.
 DEFAULT_SPLIT_YEARS = {"train": (2015, 2020), "val": (2021, 2021), "test": (2022, 2023)}
 
 
@@ -73,7 +73,7 @@ def channel_names(cfg: dict) -> list[str]:
 
 
 def write_splits(cfg: dict, events_csv: str = "data/processed/fire_events.csv") -> dict:
-    """Fire-level chronological splits, per CLAUDE.md Phase 7.
+    """Fire-level chronological splits, per DESIGN.md Phase 7.
 
     Grouped by `fire_id` and never by sample: tiles of one fire overlap 50% and share
     terrain and weather, so splitting at sample level would leak badly and inflate CSI.
@@ -230,7 +230,7 @@ class WildfireDataset(Dataset):
     def _jitter(self, x: np.ndarray) -> np.ndarray:
         """Gaussian noise and channel dropout on the CONTINUOUS channels only.
 
-        The burn mask is excluded from both. CLAUDE.md forbids intensity shifts on it, and
+        The burn mask is excluded from both. DESIGN.md forbids intensity shifts on it, and
         the reason is substantive rather than stylistic: it is the one channel the model
         conditions on to know where the fire currently is, and it shares its 0/1 scale with
         the prediction target. Perturbing it changes the question rather than the view of it.
@@ -264,7 +264,7 @@ class WildfireDataset(Dataset):
 
         `aspect_sin` is the east component of the downslope bearing and `aspect_cos` the
         north component (see `terrain_derivatives`), so they mirror exactly as u and v do.
-        Rotation is deliberately not offered: CLAUDE.md rules it out because topography
+        Rotation is deliberately not offered: DESIGN.md rules it out because topography
         does not survive arbitrary rotation.
 
         `ew`/`ns` are explicit so the transform can be tested deterministically; left as

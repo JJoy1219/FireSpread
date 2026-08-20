@@ -63,7 +63,7 @@ RH_DERIVED: set[str] = set()
 RH_EPOCH = datetime(2016, 8, 23, tzinfo=timezone.utc)
 # Names cfgrib gives these once decoded — note RH decodes as `r2`, dewpoint as `d2m`.
 CHANNELS = ["u10", "v10", "t2m", "r2"]
-# Feature spec (CLAUDE.md Phase 3): wind at T, T-6h, T-12h. Temperature and RH at T
+# Feature spec (DESIGN.md Phase 3): wind at T, T-6h, T-12h. Temperature and RH at T
 # only, but they ride along in the same messages so there is nothing to save by
 # fetching them on a different schedule.
 WIND_LAG_HOURS = (0, 6, 12)

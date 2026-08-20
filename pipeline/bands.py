@@ -62,7 +62,7 @@ def band_pos_weights(stats: dict, cap: float, floor: float = 1.0) -> np.ndarray:
     the thousands, and far-field positives are disproportionately spotting,
     separate ignitions and fire-merge artifacts -- the noisiest labels in the
     dataset, and flagged as a labelling ambiguity rather than a model failure in
-    CLAUDE.md Phase 8. Uncapped, the loss would chase that noise hardest.
+    DESIGN.md Phase 8. Uncapped, the loss would chase that noise hardest.
     """
     w = np.ones(N_BANDS, dtype="float32")
     for b in range(N_BANDS):

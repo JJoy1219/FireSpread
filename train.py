@@ -5,7 +5,7 @@
     python train.py --smoke                  # 2 short epochs, verifies the loop end to end
     python train.py --resume checkpoints/convlstm_unet/last.pt
 
-Follows CLAUDE.md Phase 6: AMP, gradient clip at 1.0, cosine annealing with warm restarts,
+Follows DESIGN.md Phase 6: AMP, gradient clip at 1.0, cosine annealing with warm restarts,
 per-epoch CSI and IoU on validation, and **best checkpoint by validation CSI, not loss**.
 That last one matters here — loss is dominated by the 99% of pixels that are unburned, so
 it keeps improving while the thing being asked for does not.
@@ -132,7 +132,7 @@ def pos_weight_from_index(cfg: dict) -> float:
 
 
 def focal_loss(logits: torch.Tensor, target: torch.Tensor, alpha: float, gamma: float):
-    """Focal loss (CLAUDE.md's fallback if class weighting is not enough).
+    """Focal loss (DESIGN.md's fallback if class weighting is not enough).
 
     Computed from logits via BCE-with-logits for the same numerical reason the model
     returns logits at all.
@@ -278,7 +278,7 @@ def train(cfg: dict, args) -> None:
     # adaptive step and effectively vanishes for the parameters that need it most.
     wd = float(tc.get("weight_decay", 0.0))
     opt = torch.optim.AdamW(model.parameters(), lr=float(tc["lr"]), weight_decay=wd)
-    # Cosine annealing with warm restarts, per CLAUDE.md. T_0 in epochs.
+    # Cosine annealing with warm restarts, per DESIGN.md. T_0 in epochs.
     sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         opt, T_0=int(tc.get("lr_restart_epochs", 10)), T_mult=2)
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
