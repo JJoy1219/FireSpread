@@ -1417,6 +1417,55 @@ reported as a result.
 **Verdict: the horizon was not the constraint.** Across 24 h, 12 h, incremental masks, distance
 rebalancing and recurrence, the model learns perimeter geometry and ignores wind.
 
+## The downwind channel: the signal is weak, not badly presented
+
+```bash
+python train.py --config configs/downwind.yaml --model unet --hidden-dims 112,224,448 --seed 0
+python -m pipeline.viz_predict sensitivity --config configs/downwind.yaml --mode permute \
+    --checkpoint checkpoints/dw_s0/best.pt --model unet --hidden-dims 112,224,448
+```
+
+Five previous attempts changed the loss, the architecture, the mask representation and the
+horizon, and all left wind arriving in the same form. The hypothesis this tests is that the
+relationship is hard to READ rather than absent: a 256 px tile at 100 m spans 25.6 km against
+HRRR's 3 km grid, so wind is nearly constant across it, and deciding "is this pixel downwind of
+the fire" means combining a uniform vector field with perimeter geometry pixel by pixel, which
+is nonlocal and awkward for a convnet.
+
+`pipeline/derived.py` computes it outright: wind projected onto the unit vector from each
+pixel's nearest burning cell, in m/s, positive downwind. The channel demonstrably carries
+signal before any training: **growth pixels average +0.62 m/s further downwind than unburned
+non-growth pixels, positive in 65% of samples.**
+
+**The model ignores it anyway.**
+
+| 3-seed mean | downwind arm | baseline |
+|---|---|---|
+| validation CSI | 0.2616 | 0.2604 |
+| FAR | 0.627 | 0.634 |
+| POD | 0.468 | 0.476 |
+| burn mask share of skill | **89.2%** | ~89% |
+| **downwind (derived), CSI drop** | **-0.0012** | n/a |
+| wind (u/v, all lags), CSI drop | +0.0021 | +0.0051 |
+
+The channel's contribution averages -0.0012 and its sign flips across seeds, which is noise
+rather than signal. Its mean |dP| (0.038 to 0.048) is comparable to raw wind's, so permuting it
+does move the output; it simply does not move it anywhere useful. CSI, FAR and POD are all
+inside seed noise, and the burn mask's share is unchanged.
+
+**This is the informative negative.** Every earlier failure left open the excuse that the model
+could not extract the relationship from a near-constant vector field. Precomputing it removes
+that excuse: handed the exact quantity, per pixel, in physical units, the model still prefers
+perimeter geometry. The constraint is the strength of the signal, not its presentation. Mean
+cos between growth direction and wind is +0.166; there is not enough there to outweigh knowing
+where the fire already is.
+
+A FAR difference that looked real did not survive checking. The downwind arm runs at FAR 0.627
+against a 12 h arm at 0.70-0.73, which looked like a precision gain until compared with the
+right reference: the 24 h baseline is also 0.634, with per-seed ranges fully overlapping
+(0.637/0.627/0.639 against 0.627/0.638/0.616). The 12 h arm's worse FAR is a property of that
+task.
+
 ## The HRRR store incident, and the two bugs it exposed
 
 Topping the shared weather store up for a second window length corrupted it three

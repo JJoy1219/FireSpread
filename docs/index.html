@@ -477,6 +477,34 @@ code { font-family: var(--mono); font-size: .88em; background: var(--surface-2);
     </p>
   </div>
 
+  <div class="card">
+    <div class="trial-head"><h3>Handing the model the wind relationship directly</h3><span class="verdict v-no">No benefit</span></div>
+    <p>
+      Every attempt above left the weather arriving in the same form. A tile spans roughly 25 kilometres
+      while the weather grid is 3 kilometres, so the wind is close to constant across it, and working out
+      whether a given pixel lies downwind of the fire means combining that near uniform field with the
+      shape of the perimeter, pixel by pixel. That is an awkward thing for this kind of network to
+      compute, so this experiment computes it in advance and supplies it as an extra input: the wind
+      projected onto the direction pointing away from the nearest burning cell.
+    </p>
+    <p>
+      The channel carries real signal. Before any training, cells that went on to burn sit on average
+      0.62 metres per second further downwind than cells that did not, in 65 percent of samples.
+    </p>
+    <p>
+      The model ignores it. Shuffling the new channel changes the score by less than a thousandth, and
+      the direction of that change flips from one training run to the next, which is what noise looks
+      like. Accuracy, false alarms and detection rate all land within the normal variation between runs,
+      and the share of skill coming from the burn mask stays at 89 percent.
+    </p>
+    <p>
+      <strong>This is the most informative of the failures.</strong> Each earlier one left room to argue
+      that the model simply could not extract the relationship from the raw wind field. Handing it the
+      exact quantity, per pixel, in physical units, removes that argument. The limit is how weak the
+      signal is, not how it was presented.
+    </p>
+  </div>
+
   <h2>Two mistakes worth publishing</h2>
   <p>
     Both were caught by measurement rather than review, and both are easy to repeat.
