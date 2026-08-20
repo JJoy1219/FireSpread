@@ -220,6 +220,12 @@ CHANNEL_GROUPS = {
                                         "aspect_cos", "tpi"],
     "canopy (CC, CH)": ["cc", "ch"],
     "burn mask": ["burn_mask"],
+    # Its own group, not folded into "wind". The question this channel exists to
+    # answer is whether the model uses the wind-to-perimeter RELATIONSHIP when it is
+    # handed over directly, which is separate from whether it uses the raw u/v field.
+    # Absent from configs that do not define it, and permuting a missing channel is a
+    # no-op, so this is safe to leave in for every arm.
+    "downwind (derived)": ["downwind"],
 }
 
 

@@ -22,6 +22,7 @@ import zarr
 from torch.utils.data import Dataset
 
 from pipeline.bands import band_index, distance_to_burn
+from pipeline.derived import downwind_stack
 from pipeline.download import ROOT, label_dir, load_config
 from pipeline.features import WEATHER_CHANNELS, static_tile, weather_tile
 
@@ -112,6 +113,12 @@ class WildfireDataset(Dataset):
         # Emitting the distance-band map costs a distance transform per sample, so it is
         # only built when the loss actually consumes it. Computed in DataLoader workers.
         self.emit_band = bool(cfg["train"].get("band_pos_weight", False))
+        # Derived channel: needs the burn mask and the wind together, so it is
+        # built per sample rather than precomputed. Deliberately absent from
+        # DIRECTION_GROUPS and from the flip negation lists: it is a scalar
+        # projection, and under a mirror the outward vector and the wind vector
+        # both negate, leaving the dot product unchanged.
+        self.downwind = "downwind" in self.channels
         aug = cfg.get("sampling", {}).get("augment", {}) or {}
         self.noise_std = float(aug.get("noise_std", 0.0))
         self.chan_drop = float(aug.get("channel_dropout", 0.0))
@@ -190,12 +197,18 @@ class WildfireDataset(Dataset):
                                "rebuild the index or repair the HRRR store")
         stat, fuel = static_tile(fid, self.cfg, row0, col0, self.patch)
 
-        # burn (1) + weather (9) + static (7), static repeated across the sequence.
-        x = np.concatenate([
-            burn[:, None],
-            wx,
-            np.repeat(stat[None], self.t_steps, axis=0),
-        ], axis=1)
+        # burn (1) + weather (9) [+ downwind (1)] + static (7), static repeated
+        # across the sequence. `channels` in the config must match this order.
+        blocks = [burn[:, None], wx]
+        if self.downwind:
+            # Wind projected onto the outward direction from the nearest burning cell.
+            # Derived here rather than in features.py because it needs BOTH the weather
+            # and the burn mask, which only meet at this point.
+            iu = WEATHER_CHANNELS.index("u10_lag0")
+            iv = WEATHER_CHANNELS.index("v10_lag0")
+            blocks.append(downwind_stack(burn, wx[:, iu], wx[:, iv])[:, None])
+        blocks.append(np.repeat(stat[None], self.t_steps, axis=0))
+        x = np.concatenate(blocks, axis=1)
         x = (x - self.mean[None, :, None, None]) / self.std[None, :, None, None]
 
         band = band_index(distance_to_burn(cum)) if self.emit_band else None
