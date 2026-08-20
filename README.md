@@ -1353,6 +1353,70 @@ resolution, and a transformer buys 2% relative AUC-PR for ~48x the FLOPs, matchi
 ConvLSTM null here. What this project adds is the share quantified by permutation occlusion
 with threshold robustness, and the sub-daily test with day/night stratification.
 
+## The 12 h horizon: no benefit, and no change in what the model uses
+
+```bash
+python train.py --config configs/h12.yaml --model unet --hidden-dims 112,224,448 --seed 0
+python -m analysis.daynight_occlusion --checkpoint checkpoints/h12_s1/best.pt
+python -m analysis.auc_pr --config configs/h12.yaml --checkpoint checkpoints/h12_s1/best.pt
+```
+
+At 24 h each window averages one afternoon run together with one overnight lull, so the wind
+at any moment is diluted by a full diurnal cycle. 12 h windows separate them, and S-NPP's two
+daily overpasses land one per window. The rebuilt dataset has 13,616 samples over 543 fires,
+1.93x the 24 h arm, and the norm stats confirm the mechanism before any model runs: 12 h
+windows are 3.7 K cooler with higher variance in temperature (7.53 -> 8.24) and humidity
+(15.59 -> 17.33), because 24 h windows all sample the same hour of day.
+
+**Accuracy: no improvement.** Three seeds, validation CSI 0.2294 / 0.2358 / 0.2391. Pooled AP
+on test looks better by lift (94.4x against 86.3x) but that is an artefact of composition: the
+12 h test set holds 13 fires that lacked enough history at 24 h, and those score lower (median
+AP 0.1629). Paired on the 109 fires both arms share:
+
+| on shared fires | 24 h | 12 h |
+|---|---|---|
+| median AP | 0.1742 | 0.1722 |
+| mean AP | 0.1958 | 0.1919 |
+
+Paired difference -0.0107 median, 12 h ahead on 47 of 109 fires, sign test p = 0.180. No
+significant difference, and the sign is negative. **Pair before comparing arms whose sample
+sets differ**; the unpaired lift was written up as a 9% improvement one step before checking.
+
+**Occlusion: the burn mask's share went UP.** Three-seed means at the stored threshold, with
+the 24 h baseline alongside:
+
+| group permuted | 12 h | 24 h |
+|---|---|---|
+| **burn mask** | **+0.1371 (93.5%)** | +0.1603 (84.8%) |
+| wind | +0.0009 | +0.0002 |
+
+Wind stays negligible at every threshold tested (+0.0031 to -0.0011).
+
+### Day against night, the test only 12 h data allows
+
+| | day windows | night windows |
+|---|---|---|
+| baseline CSI | **0.2890** | 0.1082 |
+| burn mask | +0.2784 | +0.1081 |
+| canopy (CC, CH) | +0.0268 | +0.0016 |
+| terrain | +0.0226 | +0.0157 |
+| **wind (u/v, all lags)** | **+0.0040** | **-0.0025** |
+
+Daytime windows are 2.7x more predictable than night, exactly as fire behaviour implies, so the
+split is real and the model does behave differently across it. Yet in the daytime windows where
+fires actually run, wind is beaten by canopy cover by nearly 7x.
+
+**A finding retracted before it was written up.** Temperature's CSI drop appeared to jump 6.8x
+(+0.0025 -> +0.0169), which would have made it the second most important channel. It fails the
+threshold check: +0.0183 at 0.95, **-0.0074 at 0.85, -0.0101 at 0.6**, so destroying it helps at
+lower thresholds. Its mean |dP| is genuinely elevated (0.087 against 0.054), so temperature does
+move the probabilities, but as a global level shift rather than spatial skill, consistent with the
+model reading it as a day/night clock. The threshold sweep is the only reason this was not
+reported as a result.
+
+**Verdict: the horizon was not the constraint.** Across 24 h, 12 h, incremental masks, distance
+rebalancing and recurrence, the model learns perimeter geometry and ignores wind.
+
 ## The HRRR store incident, and the two bugs it exposed
 
 Topping the shared weather store up for a second window length corrupted it three

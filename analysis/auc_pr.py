@@ -76,6 +76,7 @@ def main() -> None:
     ap.add_argument("--split", default="test")
     ap.add_argument("--batch-size", type=int, default=12)
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--per-fire-out", help="write per-fire AP to this CSV")
     a = ap.parse_args()
 
     cfg = load_config(a.config)
@@ -115,7 +116,13 @@ def main() -> None:
             if i % 10 == 0:
                 print(f"  {i * a.batch_size:,}/{len(ds):,}", flush=True)
 
-    aps = np.array([h.average_precision() for h in per_fire.values()])
+    fire_ap = {k: h.average_precision() for k, h in per_fire.items()}
+    if a.per_fire_out:
+        import pandas as pd
+        (pd.DataFrame({"fire_id": list(fire_ap), "ap": list(fire_ap.values())})
+           .to_csv(a.per_fire_out, index=False))
+        print(f"wrote {a.per_fire_out}")
+    aps = np.array(list(fire_ap.values()))
     aps = aps[~np.isnan(aps)]
 
     def row(name, h):

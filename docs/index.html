@@ -451,18 +451,29 @@ code { font-family: var(--mono); font-size: .88em; background: var(--surface-2);
   </div>
 
   <div class="card">
-    <div class="trial-head"><h3>A shorter forecast horizon</h3><span class="verdict v-run">In progress</span></div>
+    <div class="trial-head"><h3>A shorter forecast horizon</h3><span class="verdict v-no">No benefit</span></div>
     <p>
       At 24 hours each window averages one afternoon run together with one overnight lull, so the wind at
       any moment is diluted by a full diurnal cycle. Twelve hour windows separate day from night, and the
-      satellite passes twice daily, so they align with when the fire is actually observed. Rebuilding the
-      dataset at 12 hours yields 1.93 times as many samples and 100 additional fires that never had enough
-      history at 24 hours.
+      satellite passes twice daily, so each window sits on one side of the cycle. Rebuilding the dataset at
+      12 hours gives 1.93 times as many samples and 100 additional fires. The mechanism is visible in the
+      data before any model runs: 12 hour windows are 3.7 degrees cooler, with markedly higher variance in
+      both temperature and humidity.
     </p>
     <p>
-      The measurement is deliberately not CSI, which is not comparable between the two because the targets
-      have different densities. The question is whether wind's share of skill rises above the roughly 0.3
-      percent it holds at 24 hours.
+      Accuracy did not improve. Compared on the 109 fires both versions share, the median average precision
+      is 0.172 at 12 hours against 0.174 at 24 hours, with the shorter horizon ahead on 47 of those 109. A
+      sign test puts the odds of that pattern arising by chance at roughly one in six, which is no result
+      at all. Comparing the two without pairing them by fire suggests the opposite, because the 12 hour set
+      includes 13 extra fires that are harder than average.
+    </p>
+    <p>
+      The share of skill held by the burn mask went <em>up</em>, from 85 percent to 94 percent, and wind
+      stayed negligible at every threshold tested. Splitting the windows into daytime and overnight, which
+      only the shorter horizon makes possible, sharpens the point. Daytime windows are 2.7 times more
+      predictable than overnight ones, so the split is real and the model does behave differently across
+      it. Yet even in daytime windows, where fires actually run, wind is beaten by canopy cover by nearly
+      seven times.
     </p>
   </div>
 
