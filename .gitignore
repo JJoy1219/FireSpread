@@ -15,3 +15,7 @@ __pycache__/
 .ipynb_checkpoints/
 data/processed/labels_12h/
 data/processed/labels_12h_manifest.csv
+
+# GitHub Pages site assets (explicitly tracked)
+!docs/
+!docs/**

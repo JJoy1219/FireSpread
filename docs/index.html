@@ -1,0 +1,617 @@
+<meta charset="utf-8">
+<title>Wildfire Spread Prediction</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="A ConvLSTM U-Net trained to predict wildfire perimeter growth from satellite detections, weather reanalysis, fuels and terrain, with an honest account of what worked and what did not.">
+<style>
+:root {
+  --bg: #f5f3ef;
+  --surface: #ffffff;
+  --surface-2: #ebe7e0;
+  --ink: #1f1d1a;
+  --ink-2: #4a463f;
+  --ink-3: #757066;
+  --rule: #d8d2c8;
+  --unburned: #2f5d3f;
+  --low: #c8a02a;
+  --moderate: #d2701d;
+  --high: #a82c17;
+  --accent: var(--high);
+  --link: #8a3d1e;
+  --ok: #2f5d3f;
+  --warn: #a05a12;
+  --shadow: 0 1px 2px rgba(31,29,26,.06), 0 8px 24px rgba(31,29,26,.06);
+  --serif: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14150f;
+    --surface: #1c1e17;
+    --surface-2: #262922;
+    --ink: #eeeadf;
+    --ink-2: #c3bcac;
+    --ink-3: #8d8779;
+    --rule: #343730;
+    --unburned: #6aa87a;
+    --low: #e0bf50;
+    --moderate: #e8903e;
+    --high: #e05a3c;
+    --accent: var(--high);
+    --link: #e8a07a;
+    --ok: #6aa87a;
+    --warn: #e0bf50;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14150f; --surface: #1c1e17; --surface-2: #262922;
+  --ink: #eeeadf; --ink-2: #c3bcac; --ink-3: #8d8779; --rule: #343730;
+  --unburned: #6aa87a; --low: #e0bf50; --moderate: #e8903e; --high: #e05a3c;
+  --accent: var(--high); --link: #e8a07a; --ok: #6aa87a; --warn: #e0bf50;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--sans); font-size: 17px; line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.5rem; }
+.wide { max-width: 78rem; margin: 0 auto; padding: 0 1.5rem; }
+
+h1, h2, h3 { font-family: var(--serif); font-weight: 600; text-wrap: balance; line-height: 1.2; }
+h1 { font-size: clamp(2.1rem, 5vw, 3.1rem); margin: 0 0 .6rem; letter-spacing: -.01em; }
+h2 { font-size: 1.65rem; margin: 3.5rem 0 .3rem; }
+h3 { font-size: 1.18rem; margin: 2rem 0 .3rem; }
+p { margin: .85rem 0; color: var(--ink-2); }
+a { color: var(--link); text-underline-offset: 2px; }
+strong { color: var(--ink); font-weight: 600; }
+
+.eyebrow {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--ink-3); margin: 0 0 .9rem;
+}
+header.hero { border-bottom: 1px solid var(--rule); padding: 4.5rem 0 2.5rem; margin-bottom: 1rem; }
+.lede { font-size: 1.17rem; color: var(--ink-2); max-width: 40rem; }
+
+.severity { display: flex; height: 5px; border-radius: 3px; overflow: hidden; margin: 1.8rem 0 0; max-width: 26rem; }
+.severity i { flex: 1; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 1px;
+         background: var(--rule); border: 1px solid var(--rule); border-radius: 8px;
+         overflow: hidden; margin: 2rem 0; }
+.stat { background: var(--surface); padding: .95rem 1rem; }
+.stat .k { font-family: var(--mono); font-size: .68rem; letter-spacing: .1em;
+           text-transform: uppercase; color: var(--ink-3); display: block; }
+.stat .v { font-family: var(--serif); font-size: 1.55rem; font-variant-numeric: tabular-nums;
+           color: var(--ink); display: block; margin-top: .15rem; }
+.stat .n { font-size: .8rem; color: var(--ink-3); }
+
+table { width: 100%; border-collapse: collapse; margin: 1.2rem 0; font-size: .93rem; }
+th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--rule); }
+th { font-family: var(--mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
+     color: var(--ink-3); font-weight: 400; }
+td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+        padding: 1.1rem 1.3rem; margin: 1.4rem 0; box-shadow: var(--shadow); }
+.card h3 { margin-top: 0; }
+.verdict { font-family: var(--mono); font-size: .68rem; letter-spacing: .1em; text-transform: uppercase;
+           padding: .18rem .5rem; border-radius: 4px; white-space: nowrap; }
+.v-no { background: color-mix(in srgb, var(--high) 16%, transparent); color: var(--high); }
+.v-part { background: color-mix(in srgb, var(--low) 22%, transparent); color: var(--warn); }
+.v-yes { background: color-mix(in srgb, var(--unburned) 18%, transparent); color: var(--ok); }
+.v-run { background: var(--surface-2); color: var(--ink-3); }
+.trial-head { display: flex; align-items: baseline; gap: .7rem; flex-wrap: wrap; }
+
+/* viewer */
+.viewer { background: var(--surface); border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+          padding: 2.5rem 0 3rem; margin: 3rem 0; }
+.controls { display: flex; gap: 1.2rem; flex-wrap: wrap; align-items: flex-end; margin-bottom: 1.4rem; }
+.ctl { display: flex; flex-direction: column; gap: .3rem; }
+.ctl label { font-family: var(--mono); font-size: .68rem; letter-spacing: .1em;
+             text-transform: uppercase; color: var(--ink-3); }
+select, button, input[type=range] { font: inherit; font-size: .9rem; color: var(--ink);
+        background: var(--surface-2); border: 1px solid var(--rule); border-radius: 6px; padding: .4rem .6rem; }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+input[type=range] { padding: 0; min-width: 15rem; accent-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1.1rem; }
+.panel { min-width: 0; }
+.panel h4 { font-family: var(--mono); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase;
+            color: var(--ink-3); margin: 0 0 .45rem; font-weight: 400; }
+.frame { position: relative; background: var(--surface-2); border: 1px solid var(--rule);
+         border-radius: 8px; overflow: hidden; aspect-ratio: 1 / 1; }
+.frame img, .frame canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+         object-fit: contain; image-rendering: pixelated; }
+.readout { display: flex; gap: 1.4rem; flex-wrap: wrap; margin-top: 1.2rem;
+           font-family: var(--mono); font-size: .82rem; color: var(--ink-2); }
+.readout b { color: var(--ink); font-weight: 600; }
+.legend { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: .8rem; font-size: .8rem; color: var(--ink-3); }
+.legend i { display: inline-block; width: .72rem; height: .72rem; border-radius: 2px; margin-right: .35rem;
+            vertical-align: -1px; }
+.note { font-size: .88rem; color: var(--ink-3); }
+footer { border-top: 1px solid var(--rule); margin-top: 4rem; padding: 2rem 0 3.5rem;
+         font-size: .88rem; color: var(--ink-3); }
+code { font-family: var(--mono); font-size: .88em; background: var(--surface-2);
+       padding: .1rem .32rem; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Machine learning for fire behaviour</p>
+    <h1>Predicting where a wildfire grows next</h1>
+    <p class="lede">
+      A ConvLSTM U-Net trained on eight years of California fires, using satellite detections,
+      hourly weather, fuel maps and terrain. This page shows what it predicts, how it was measured,
+      and the experiments that did not work.
+    </p>
+    <div class="severity" aria-hidden="true">
+      <i style="background:var(--unburned)"></i><i style="background:var(--low)"></i>
+      <i style="background:var(--moderate)"></i><i style="background:var(--high)"></i>
+    </div>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+  <h2>What the model does</h2>
+  <p>
+    Given where a fire has burned so far, plus the weather, fuel and terrain around it, the model
+    predicts which currently unburned pixels will burn in the next 24 hours. Everything runs on a
+    100 metre grid in an equal area projection, cropped to 256 by 256 pixel tiles that follow the
+    active perimeter.
+  </p>
+
+  <div class="scroll"><table>
+    <tr><th>Input</th><th>Source</th><th>Detail</th></tr>
+    <tr><td>Fire detections</td><td>VIIRS S-NPP, 375 m</td><td>Clustered into fire events, rasterised into burn masks</td></tr>
+    <tr><td>Weather</td><td>HRRR, 3 km hourly</td><td>Wind at 0, 6 and 12 hour lags, temperature, humidity</td></tr>
+    <tr><td>Fuels</td><td>LANDFIRE, 30 m</td><td>40 Scott and Burgan fuel models, canopy cover and height</td></tr>
+    <tr><td>Terrain</td><td>USGS 3DEP</td><td>Slope, aspect as sine and cosine, topographic position</td></tr>
+  </table></div>
+
+  <p class="note">
+    Seventeen continuous channels plus a learned embedding of the fuel class, across three
+    timesteps of history.
+  </p>
+</div>
+
+<section class="viewer" id="viewer">
+  <div class="wide">
+    <p class="eyebrow">Interactive</p>
+    <h2 style="margin-top:.2rem">Day by day, prediction against truth</h2>
+    <p style="max-width:46rem">
+      Four fires from the validation and test years. Step through the timeline to compare what the
+      model predicted with what actually burned. Wind arrows are drawn from the same HRRR fields the
+      model receives.
+    </p>
+
+    <div class="controls">
+      <div class="ctl">
+        <label for="fire">Fire</label>
+        <select id="fire"></select>
+      </div>
+      <div class="ctl">
+        <label for="layer">Context layer</label>
+        <select id="layer">
+          <option value="none">None</option>
+          <option value="elevation">Elevation</option>
+          <option value="slope">Slope</option>
+          <option value="canopy_cover">Canopy cover</option>
+          <option value="canopy_height">Canopy height</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <label for="wind">Wind arrows</label>
+        <select id="wind"><option value="on">Shown</option><option value="off">Hidden</option></select>
+      </div>
+      <div class="ctl" style="flex:1; min-width:16rem">
+        <label for="t">Timeline <span id="tlabel"></span></label>
+        <input type="range" id="t" min="0" max="0" value="0" step="1">
+      </div>
+      <div class="ctl"><label>&nbsp;</label><button id="play">Play</button></div>
+    </div>
+
+    <div class="panels">
+      <div class="panel">
+        <h4>Burned so far</h4>
+        <div class="frame"><img id="img-burned" alt="Area burned up to this date"><canvas id="cv-burned"></canvas></div>
+      </div>
+      <div class="panel">
+        <h4>Predicted growth</h4>
+        <div class="frame"><img id="img-pred" alt="Predicted new growth"><canvas id="cv-pred"></canvas></div>
+      </div>
+      <div class="panel">
+        <h4>Actual growth</h4>
+        <div class="frame"><img id="img-truth" alt="Observed new growth"><canvas id="cv-truth"></canvas></div>
+      </div>
+    </div>
+
+    <div class="readout" id="readout"></div>
+    <div class="legend">
+      <span><i style="background:var(--high)"></i>predicted growth</span>
+      <span><i style="background:var(--low)"></i>observed growth</span>
+      <span><i style="background:var(--ink-3)"></i>already burned</span>
+      <span id="ctxrange"></span>
+    </div>
+    <p class="note" id="loadnote" style="margin-top:1rem">Loading fire data.</p>
+  </div>
+</section>
+
+<div class="wrap">
+  <h2>How well it works</h2>
+  <p>
+    The headline metric is the Critical Success Index, the intersection over union of predicted and
+    observed new growth. Reported on fires from 2022 and 2023, which the model never saw.
+  </p>
+
+  <div class="stats">
+    <div class="stat"><span class="k">CSI, pooled</span><span class="v">0.185</span><span class="n">all tiles together</span></div>
+    <div class="stat"><span class="k">CSI, per fire</span><span class="v">0.099</span><span class="n">median, the honest figure</span></div>
+    <div class="stat"><span class="k">False alarm ratio</span><span class="v">0.78</span><span class="n">of predicted growth</span></div>
+    <div class="stat"><span class="k">Detection rate</span><span class="v">0.56</span><span class="n">of real growth found</span></div>
+  </div>
+
+  <p>
+    Pooling every tile weights large fires heavily, so a handful of megafires dominate the number.
+    Aggregating per fire weights each fire equally and gives 0.099. Both are reported here because
+    quoting only the pooled figure overstates the result.
+  </p>
+
+  <h3>Against simple baselines</h3>
+  <div class="scroll"><table>
+    <tr><th>Method</th><th class="num">CSI</th><th>Note</th></tr>
+    <tr><td><strong>ConvLSTM U-Net</strong></td><td class="num"><strong>0.185</strong></td><td>this model</td></tr>
+    <tr><td>Dilate the perimeter by 3 cells</td><td class="num">0.102</td><td>strongest naive method</td></tr>
+    <tr><td>Circular spread at median rate</td><td class="num">0.079</td><td>constant radial growth</td></tr>
+    <tr><td>Persistence</td><td class="num">0.000</td><td>see below</td></tr>
+  </table></div>
+  <p>
+    Persistence, meaning predict that tomorrow looks like today, is often described as a strong
+    baseline. It scores exactly zero here, and that is structural rather than surprising. The target
+    is <em>new</em> burn, and already burned pixels are excluded from it, so a prediction that copies
+    the current mask cannot intersect the target at all. Beating persistence would have been
+    meaningless, which is why the dilation ring is used instead.
+  </p>
+
+  <h3>Skill depends heavily on fire size</h3>
+  <div class="scroll"><table>
+    <tr><th>Fire size quartile</th><th class="num">Fires</th><th class="num">Median CSI</th></tr>
+    <tr><td>Smallest</td><td class="num">29</td><td class="num">0.056</td></tr>
+    <tr><td>Second</td><td class="num">28</td><td class="num">0.097</td></tr>
+    <tr><td>Third</td><td class="num">28</td><td class="num">0.092</td></tr>
+    <tr><td><strong>Largest</strong></td><td class="num">28</td><td class="num"><strong>0.189</strong></td></tr>
+  </table></div>
+  <p>
+    A factor of 3.4 between the smallest and largest quartiles. Small fires have fewer active pixels,
+    a larger share of the perimeter shaped by suppression, and less signal per tile. The 2022 and 2023
+    seasons were mild and dominated by small fires, so the test split is weighted toward exactly the
+    cases the model handles worst.
+  </p>
+
+  <h2>The result that reframed the project</h2>
+  <p>
+    Predictions look like near symmetric haloes around the current perimeter rather than wind driven
+    plumes. To test that impression, each group of input channels was shuffled across the batch,
+    destroying its link to the target while keeping its distribution realistic, and the loss of skill
+    measured.
+  </p>
+
+  <div class="scroll"><table>
+    <tr><th>Input group shuffled</th><th class="num">CSI lost</th><th class="num">Share of skill</th></tr>
+    <tr><td><strong>Current burn mask</strong></td><td class="num"><strong>0.131</strong></td><td class="num"><strong>89%</strong></td></tr>
+    <tr><td>Canopy cover and height</td><td class="num">0.013</td><td class="num">8%</td></tr>
+    <tr><td>Terrain</td><td class="num">0.007</td><td class="num">4%</td></tr>
+    <tr><td>Wind, all lags</td><td class="num">0.005</td><td class="num">3%</td></tr>
+    <tr><td>Humidity and fuel moisture</td><td class="num">0.005</td><td class="num">3%</td></tr>
+    <tr><td>Temperature</td><td class="num">0.002</td><td class="num">1%</td></tr>
+  </table></div>
+
+  <p>
+    <strong>The burn mask alone accounts for roughly 89 percent of the skill.</strong> Wind, the single
+    most important physical driver of fire spread, costs less when destroyed than canopy cover does.
+    Every physical driver combined contributes about a fifth of baseline skill.
+  </p>
+  <p>
+    This was checked at four different decision thresholds, from 0.30 to 0.95, and the burn mask carries
+    between 81 and 90 percent at every one of them. It is a property of the model rather than an artefact
+    of where the operating point sits.
+  </p>
+  <p>
+    So beating the dilation ring by 1.8 times is the model learning a <em>better shaped dilation</em>,
+    not learning fire physics. That explains several earlier observations at once: why the recurrent
+    layers bought nothing, why weather side changes did not help, and why skill scales with fire size,
+    since larger fires offer more perimeter geometry to work with.
+  </p>
+
+  <h2>What we tried</h2>
+  <p>
+    Each of these was run as a controlled change against the same splits, with the success criterion
+    written down before the run rather than chosen afterwards.
+  </p>
+
+  <div class="card">
+    <div class="trial-head"><h3>Recurrence: does the ConvLSTM earn its cost?</h3><span class="verdict v-no">No benefit</span></div>
+    <p>
+      Compared against a plain U-Net matched for parameter count. The ConvLSTM won on validation and lost
+      on test. The comparison was then repeated with five timesteps of history and a burn mask that made
+      fire history recoverable only by integrating the sequence, removing both explanations that blamed the
+      inputs rather than the architecture. Across four comparisons the U-Net was equal or better in three.
+      What makes the result trustworthy is not any single number but that the sign flips between splits,
+      which a real architectural advantage would not do.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="trial-head"><h3>Regularisation: weight decay, dropout, augmentation</h3><span class="verdict v-no">No benefit</span></div>
+    <p>
+      Every run overfits from about epoch 8. Weight decay and dropout landed inside seed noise. The
+      augmentation arm posted the best validation score of any run in the project and turned out to be a
+      mirage: it predicted above 0.5 for 98.97 percent of all pixels, against a true positive rate near
+      0.6 percent.
+    </p>
+    <p>
+      The cause is an interaction worth knowing about. Label smoothing multiplies with class weighting.
+      Weighted cross entropy puts the optimum for a smoothed target at a probability that scales with the
+      class weight, and at a smoothing of 0.02 with a weight of 103 every negative pixel is pulled to
+      about 0.51. The measured median was 0.515. CSI never revealed it, because CSI at a high threshold is
+      blind to a uniformly shifted probability floor. Only the Brier score and the probability histogram
+      caught it.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="trial-head"><h3>Removing the shortcut: incremental burn masks</h3><span class="verdict v-no">Made it worse</span></div>
+    <p>
+      If the cumulative mask is what lets the model coast on geometry, then giving each timestep only that
+      window's new burn should force the physical channels to carry weight. It did not. The burn mask still
+      carried 87 percent of skill against 88.6 percent before, wind's contribution fell by a factor of five,
+      and validation CSI dropped well outside seed noise. The model did not turn toward physics, it received
+      a worse mask and dilated that instead.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="trial-head"><h3>Rebalancing the loss by distance</h3><span class="verdict v-part">Mixed</span></div>
+    <p>
+      Skill is concentrated near the perimeter, and a single global class weight is part of the reason. The
+      positive rate falls from about 10 percent one cell out to 0.18 percent beyond 3 kilometres, so the
+      balancing weight each distance band needs ranges from 9 to 552. Applying one value of 103 everywhere
+      over weights near positives and under weights far ones, which instructs the model to build a ring.
+    </p>
+    <p>
+      Rebalancing per band did not improve aggregate far field skill, and the baseline stayed ahead. What it
+      did do is push skill outward: the band beyond 3.2 kilometres improved by a factor of 2 to 2.6, at the
+      cost of the band between 1.2 and 2 kilometres, which holds more pixels and therefore dominates the
+      aggregate.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="trial-head"><h3>A shorter forecast horizon</h3><span class="verdict v-run">In progress</span></div>
+    <p>
+      At 24 hours each window averages one afternoon run together with one overnight lull, so the wind at
+      any moment is diluted by a full diurnal cycle. Twelve hour windows separate day from night, and the
+      satellite passes twice daily, so they align with when the fire is actually observed. Rebuilding the
+      dataset at 12 hours yields 1.93 times as many samples and 100 additional fires that never had enough
+      history at 24 hours.
+    </p>
+    <p>
+      The measurement is deliberately not CSI, which is not comparable between the two because the targets
+      have different densities. The question is whether wind's share of skill rises above the roughly 0.3
+      percent it holds at 24 hours.
+    </p>
+  </div>
+
+  <h2>Two mistakes worth publishing</h2>
+  <p>
+    Both were caught by measurement rather than review, and both are easy to repeat.
+  </p>
+  <h3>A metric read at the wrong operating point</h3>
+  <p>
+    An early conclusion held that the model was blind beyond 1.2 kilometres, with a detection rate of
+    0.002. That was an artefact. The threshold had been chosen to maximise pooled CSI, which is dominated
+    by the near perimeter ring, and reading far field skill at that same point understates it badly. The
+    same model at a lower threshold scores 0.086 in the far field rather than 0.051, and 0.145 in the band
+    that supposedly showed nothing. The skill was there and the operating point hid it.
+  </p>
+  <h3>Verifying the convenient property instead of the necessary one</h3>
+  <p>
+    A weather store repair was checked by comparing the list of stored timestamps before and after. Nothing
+    was missing, so it passed. But the list is only an index. The code gates on a separate flag saying the
+    hour holds data, and reads a third array for the values, so an hour can be listed and still be empty, or
+    listed, flagged as present, and hold another hour's weather. Verifying the array that was easy to read
+    rather than the one the code depends on let silent corruption through. The fix was a checker that
+    re-downloads sampled hours and compares them byte for byte.
+  </p>
+
+  <h2>Honest summary</h2>
+  <p>
+    This is not an operational fire prediction tool and should not be described as one. A median per fire
+    CSI near 0.10, a false alarm ratio of 0.78, and skill that comes overwhelmingly from perimeter geometry
+    together mean the model cannot answer the question that matters operationally, which is which direction
+    a fire will run tonight.
+  </p>
+  <p>
+    What the project does offer is a complete and reproducible pipeline from raw public data to evaluation,
+    a set of baselines that are honest rather than flattering, and several negative results that are
+    documented in enough detail to save someone else the same experiments. The comparison against FARSITE,
+    the operational benchmark this work set out to beat, has not been run, so that goal is untested rather
+    than achieved.
+  </p>
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>
+      Built with PyTorch, rasterio, xarray and zarr. Data from NASA FIRMS, NOAA HRRR, LANDFIRE and USGS 3DEP.
+      Predictions shown above come from the wide U-Net checkpoint at its validation selected threshold of 0.95.
+    </p>
+    <p>
+      <a href="https://github.com/JJoy1219/FireSpread">Source and full write up on GitHub</a>
+      &nbsp;·&nbsp;
+      <a href="glossary.html">Working glossary of terms</a>
+    </p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const els = {
+    fire: $('fire'), layer: $('layer'), wind: $('wind'), t: $('t'), tlabel: $('tlabel'),
+    play: $('play'), readout: $('readout'), note: $('loadnote'), ctxrange: $('ctxrange'),
+  };
+  const panes = ['burned', 'pred', 'truth'].map(k => ({
+    key: k, img: $('img-' + k), cv: $('cv-' + k),
+  }));
+  let data = null, fire = null, timer = null;
+
+  fetch('web_bundle.json')
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(d => { data = d; init(); })
+    .catch(e => { els.note.textContent = 'Could not load web_bundle.json (' + e.message + ').'; });
+
+  function init() {
+    data.fires.forEach((f, i) => {
+      const o = document.createElement('option');
+      o.value = i;
+      o.textContent = f.fire_id + '  (' + f.split + ', ' + f.frames.length + ' days)';
+      els.fire.appendChild(o);
+    });
+    els.fire.onchange = () => selectFire(+els.fire.value);
+    els.layer.onchange = render;
+    els.wind.onchange = render;
+    els.t.oninput = render;
+    els.play.onclick = togglePlay;
+    selectFire(0);
+    els.note.remove();
+  }
+
+  function selectFire(i) {
+    fire = data.fires[i];
+    els.t.max = fire.frames.length - 1;
+    els.t.value = 0;
+    stop();
+    render();
+  }
+
+  function render() {
+    const fr = fire.frames[+els.t.value];
+    panes[0].img.src = fr.burned;
+    panes[1].img.src = fr.pred;
+    panes[2].img.src = fr.truth;
+    els.tlabel.textContent = '· ' + fr.date;
+
+    // Areas use the native 100 m grid, not the downsampled display resolution.
+    const cellHa = (fire.native_res_m * fire.native_res_m) / 10000;
+    const ha = px => (px * cellHa);
+    const fmt = v => v >= 1000 ? Math.round(v).toLocaleString() : v.toFixed(0);
+    els.readout.innerHTML = [
+      ['date', fr.date],
+      ['burned so far', fmt(ha(fr.burned_px)) + ' ha'],
+      ['actual new growth', fmt(ha(fr.new_px)) + ' ha'],
+      ['predicted new growth', fmt(ha(fr.pred_px)) + ' ha'],
+      ['CSI this day', fr.csi.toFixed(3)],
+      ['temperature', fr.wind.t2m.toFixed(1) + ' °C'],
+      ['humidity', fr.wind.rh.toFixed(0) + '%'],
+    ].map(([k, v]) => '<span>' + k + ' <b>' + v + '</b></span>').join('');
+
+    const lay = els.layer.value;
+    const st = lay !== 'none' ? fire.static[lay] : null;
+    els.ctxrange.textContent = st
+      ? els.layer.options[els.layer.selectedIndex].text + ' range ' +
+        st.min.toFixed(0) + ' to ' + st.max.toFixed(0)
+      : '';
+
+    panes.forEach(p => drawOverlay(p, fr, st));
+  }
+
+  function drawOverlay(pane, fr, st) {
+    const cv = pane.cv, box = cv.parentElement.getBoundingClientRect();
+    const w = Math.max(1, Math.round(box.width)), h = Math.max(1, Math.round(box.height));
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+
+    // The images are letterboxed by object-fit: contain, so match that box exactly.
+    const scale = Math.min(w / fire.width, h / fire.height);
+    const iw = fire.width * scale, ih = fire.height * scale;
+    const ox = (w - iw) / 2, oy = (h - ih) / 2;
+
+    if (st) {
+      const im = new Image();
+      im.onload = () => {
+        ctx.save();
+        ctx.globalAlpha = 0.35;
+        ctx.globalCompositeOperation = 'multiply';
+        ctx.drawImage(im, ox, oy, iw, ih);
+        ctx.restore();
+        if (els.wind.value === 'on') arrows(ctx, fr, ox, oy, iw, ih);
+      };
+      im.src = st.png;
+      return;
+    }
+    if (els.wind.value === 'on') arrows(ctx, fr, ox, oy, iw, ih);
+  }
+
+  function arrows(ctx, fr, ox, oy, iw, ih) {
+    const u = fr.wind.u, v = fr.wind.v;
+    if (!u || !u.length) return;
+    const rows = u.length, cols = u[0].length;
+    let peak = 0;
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < cols; c++) peak = Math.max(peak, Math.hypot(u[r][c], v[r][c]));
+    if (peak <= 0) return;
+
+    const cw = iw / cols, ch = ih / rows;
+    const maxLen = Math.min(cw, ch) * 0.85;
+    ctx.save();
+    ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--ink') || '#000';
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 1.25;
+    ctx.lineCap = 'round';
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const su = u[r][c], sv = v[r][c];
+        const mag = Math.hypot(su, sv);
+        if (mag < 1e-6) continue;
+        const cx = ox + (c + 0.5) * cw, cy = oy + (r + 0.5) * ch;
+        const len = (mag / peak) * maxLen;
+        // v is northward and canvas y grows downward, so the y component is negated.
+        const dx = (su / mag) * len * 0.5, dy = -(sv / mag) * len * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(cx - dx, cy - dy);
+        ctx.lineTo(cx + dx, cy + dy);
+        const ang = Math.atan2(dy, dx), head = Math.min(4, len * 0.35);
+        ctx.lineTo(cx + dx - head * Math.cos(ang - 0.4), cy + dy - head * Math.sin(ang - 0.4));
+        ctx.moveTo(cx + dx, cy + dy);
+        ctx.lineTo(cx + dx - head * Math.cos(ang + 0.4), cy + dy - head * Math.sin(ang + 0.4));
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function togglePlay() { timer ? stop() : start(); }
+  function start() {
+    els.play.textContent = 'Pause';
+    timer = setInterval(() => {
+      els.t.value = (+els.t.value + 1) % fire.frames.length;
+      render();
+    }, 750);
+  }
+  function stop() { clearInterval(timer); timer = null; els.play.textContent = 'Play'; }
+
+  let rt;
+  addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(render, 120); });
+})();
+</script>
